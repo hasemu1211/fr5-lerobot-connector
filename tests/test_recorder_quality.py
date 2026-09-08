@@ -98,9 +98,10 @@ class RecorderContractTest(unittest.TestCase):
         self.assertIn("_arm_stream_paused = true", write_body)
         self.assertIn("if (_arm_stream_paused.load()) return", write_body)
         self.assertNotIn("_restart_servo_after_gripper", source)
+        # Inspect the paused-arm early return, not earlier freshness-guard reads.
         self.assertLess(
-            write_body.index("udp_command_error.load()"),
-            write_body.index("_arm_stream_paused.load()"),
+            write_body.index("const int controller_error = udp_command_error.load()"),
+            write_body.index("if (_arm_stream_paused.load()) return"),
         )
         worker_body = source.split("void FairinoHardwareInterface::gripper_worker", 1)[1]
         self.assertIn("GetRobotRealTimeState", worker_body)
