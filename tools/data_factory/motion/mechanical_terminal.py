@@ -14,7 +14,7 @@ from tools.data_factory.readiness import RECORDER_READINESS_CONTRACT
 PHASES = ("RECYCLE_APPROACH_PTP", "LOWER_LIN", "GRIPPER_OPEN", "RETREAT_LIN", "SAFE_POSE_PTP")
 
 
-def closure_plateau(plan, snapshot, now, steady_now, *, endpoint=False):
+def closure_plateau(plan, snapshot, now, steady_now, *, endpoint=False, native_equivalence=False):
     """Consume the existing native settled-away proof and calibrated range.
 
     Hardware completion reason 2 is produced after observed movement and the
@@ -31,13 +31,18 @@ def closure_plateau(plan, snapshot, now, steady_now, *, endpoint=False):
         wire = check_hardware(observed, now, steady_now, source["planning"]["max_joint_state_age_s"])
         feedback, reference = controller["feedback_position_m"], controller["reference_position_m"]
         accepted = required["acceptable_feedback_m"]
+        equivalent = None
+        if native_equivalence:
+            from tools.data_factory.rollout.gripper_evidence import native_close_equivalence
+            opened = next(s for s in source["steps"] if s["phase"] == "GRIPPER_OPEN")
+            equivalent = native_close_equivalence(wire, required, opened["gripper_position_m"])
         # Same reference tolerance/range as PickupExecutor's existing qualified
         # gripper feedback consumer. No new physical contact threshold.
         reason = wire["completion_reason"]
         if (controller["ready"] is not True or reason not in ((1, 2) if endpoint else (2,))
                 or wire["generation"] <= 0
                 or any(type(v) not in (int, float) or not math.isfinite(v) for v in (feedback, reference))
-                or abs(reference-required["command_position_m"]) > 1e-9
+                or not native_equivalence and abs(reference-required["command_position_m"]) > 1e-9
                 or abs(wire["raw_reference_m"]-reference) > 1e-9
                 or abs(wire["feedback_m"]-feedback) > 1e-9
                 or reason == 2 and feedback <= reference
@@ -51,7 +56,10 @@ def closure_plateau(plan, snapshot, now, steady_now, *, endpoint=False):
                 "gripper_evidence_digest": required["evidence_digest"],
                 "grasp_profile_digest": source["binding_digests"]["grasp_profile"],
                 "object_profile_digest": source["binding_digests"]["object_profile"],
-                "snapshot_digest": canonical_digest(snapshot), "physical_success": False}
+                "snapshot_digest": canonical_digest(snapshot), "physical_success": False,
+                "native_equivalence": equivalent}
+    except ContractError:
+        raise
     except (KeyError, TypeError, ValueError) as exc:
         raise ContractError("MECHANICAL_CLOSURE_PLATEAU_UNAVAILABLE") from exc
 

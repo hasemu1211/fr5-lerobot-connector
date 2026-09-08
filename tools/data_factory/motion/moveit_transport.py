@@ -155,8 +155,7 @@ class RosMoveItTransport:
         if not first:
             return {"status": "UNAVAILABLE", "code": "CONTACT_PROSPECTIVE_START_REQUIRED"}
         segments = plan["steps"][0].get("held_target_segments", [])
-        if (not segments or segments[-1]["type"] != "GRIPPER"
-                or any(step["type"] != "ARM" for step in segments[:-1])):
+        if not segments or any(step["type"] not in {"ARM", "GRIPPER"} for step in segments):
             return {"status": "UNAVAILABLE", "code": "CONTACT_PREFIX_UNSUPPORTED"}
         try:
             context = prepare(self, plan, scene_object)
@@ -205,6 +204,8 @@ class RosMoveItTransport:
                                  [2*(x*z+y*w),2*(y*z-x*w),1-2*(x*x+y*y)]]}, "MECHANICAL_FK")
 
     def check_contact_segment(self, plan, step, snapshot, context, *, closing):
+        if context["close"] is not None:
+            return self.check_mechanical_step(plan, step, snapshot)
         self._read_mechanical_scene(plan["learned_source_program"], released=self._contact_world_object)
         checked = {**plan, "initial_joint_state": snapshot["joint_positions"], "steps": [step]}
         if closing:
@@ -305,7 +306,7 @@ class RosMoveItTransport:
     def check_mechanical_step(self, terminal, step, snapshot):
         source,attached,released=self._mechanical_scene_expected
         self._read_mechanical_scene(source,attached,released)
-        self._check_plan_collision({**terminal,"initial_joint_state":snapshot["joint_positions"],
+        return self._check_plan_collision({**terminal,"initial_joint_state":snapshot["joint_positions"],
             "steps":[step],"mechanical_terminal":True},snapshot["gripper_controller"]["feedback_position_m"])
 
     def _read_mechanical_scene(self, source, attached=None, released=None):
@@ -614,7 +615,7 @@ class RosMoveItTransport:
             if self._gripper_hardware_state is not None:
                 observed = decode_dynamic_state(self._gripper_hardware_state, self._gripper_source_clock,
                                                 self._gripper_hardware_received_at)
-                if observed["wire"]["version"] in (1, 2, 3):
+                if observed["wire"]["version"] in (1, 2, 3, 4):
                     break
             self._rclpy.spin_once(self.node, timeout_sec=.01)
         if observed is None:
@@ -651,8 +652,8 @@ class RosMoveItTransport:
         try:
             hw = self._gripper_hardware_evidence()
             check_current_bracket(hw["wire"], time.time(), self._clock(), max_age_s)
-            version = 3 if self._gripper_source_clock["schema_version"] == "fr5.gripper_temporal_policy.v1" else 2
-            return hw["wire"]["version"] == version and hw["wire"]["valid"] == 1
+            versions = (3, 4) if self._gripper_source_clock["schema_version"] == "fr5.gripper_temporal_policy.v1" else (2,)
+            return hw["wire"]["version"] in versions and hw["wire"]["valid"] == 1
         except (ContractError, TypeError, KeyError):
             return False
 

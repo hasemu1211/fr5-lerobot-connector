@@ -57,10 +57,14 @@ def prepare(transport, plan, scene_object):
         path, _ = bound_document(root, folder, pins[key])
         profiles[key] = _profile(root, folder, path.stem, key + "_id" if key != "robot_system" else "robot_system_id", schema)
     obj, grasp = profiles["object_profile"], profiles["grasp_profile"]
+    requirements = copy.deepcopy(grasp["gripper_close"])
+    if grasp["schema_version"] == "data_factory.grasp_profile.v3":
+        requirements.update(open_velocity_percent=grasp["gripper_open"]["velocity_percent"],
+                            open_force_percent=grasp["gripper_open"]["force_percent"])
     if (scene_object.get("state") != "ON_SURFACE" or scene_object.get("object_profile_id") != obj["object_profile_id"]
             or grasp.get("object_profile_digest") != pins["object_profile"]
             or grasp["grasp_geometry"]["datum_to_tcp_grasp"] != qualification["datum_to_tcp_grasp"]
-            or grasp["gripper_close"] != source["gripper_requirements"]):
+            or requirements != source["gripper_requirements"]):
         raise ContractError("CONTACT_PROFILE_BINDING")
     _, cell = bound_document(root, "cells", pins["cell_calibration"])
     _, yaw0 = bound_document(root, "workspace_sheets", pins["yaw0_sheet"])
@@ -118,7 +122,7 @@ def prepare(transport, plan, scene_object):
 
 def before(transport, plan, step, observation, context):
     from tools.data_factory.rollout.gripper_evidence import check_transition
-    if context["plan_digest"] != canonical_digest(plan) or context["close"] is not None:
+    if context["plan_digest"] != canonical_digest(plan):
         raise ContractError("CONTACT_PREFIX_BINDING")
     if "sha256:" + hashlib.sha256(transport._robot_description.encode()).hexdigest() != plan["binding_digests"]["robot_description_digest"]:
         raise ContractError("CONTACT_MODEL_BINDING")
@@ -127,12 +131,21 @@ def before(transport, plan, step, observation, context):
         check_transition(prior[-1]["terminal_observation"], observation, command=False)
     source = plan["learned_source_program"]
     snapshot = observation["snapshot"]
-    if snapshot["gripper_controller"]["reference_position_m"] != context["open_m"]:
-        raise ContractError("CONTACT_PREFIX_NOT_OPEN")
-    is_close = step["type"] == "GRIPPER"
-    if is_close:
-        if step["gripper_position_m"] != source["gripper_requirements"]["command_position_m"]:
-            raise ContractError("CONTACT_CLOSE_REFERENCE")
+    if snapshot["gripper_controller"]["hardware_execution"]["wire"]["version"] != 4:
+        raise ContractError("CONTACT_NATIVE_SELECTED_TUPLE_UNAVAILABLE")
+    command = step["type"] == "GRIPPER"
+    target = step["gripper_position_m"]
+    endpoint = lambda value: math.floor(100 * value / context["open_m"] + .5)
+    equivalent_target = 0 <= target <= context["open_m"] and endpoint(target) == endpoint(source["gripper_requirements"]["command_position_m"])
+    is_close = command and equivalent_target and endpoint(target) <= round(snapshot["gripper_controller"]["feedback_position_m"] / context["open_m"] * 100)
+    held = context["close"] is not None
+    if held:
+        if command and not equivalent_target:
+            raise ContractError("CONTACT_HELD_EVOLUTION_UNSUPPORTED")
+        from .mechanical_terminal import closure_plateau
+        closure_plateau(plan, snapshot, observation["captured_at_s"], observation["captured_monotonic_s"],
+                        endpoint=True, native_equivalence=True)
+    if is_close and not held:
         # The close is stationary and at the source-bound contact pose. FK is
         # measured now, not inferred from the learned row's requested pose.
         tool = transport.contact_fk(source, snapshot, source["frames"]["tool_link"])
@@ -152,28 +165,35 @@ def before(transport, plan, step, observation, context):
                <= max(box["center"][axis] - box["dimensions"][axis]/2, relation["translation_m"][axis] - half[axis])
                for box in context["fingertip_boxes"] for axis in (1, 2)):
             raise ContractError("CONTACT_CAPTURE_GEOMETRY")
-    elif (step["type"] != "ARM" or step["gripper_position_m"] != context["open_m"]
-          or snapshot["gripper_controller"]["reference_position_m"] != context["open_m"]):
-        raise ContractError("CONTACT_PREFIX_NOT_OPEN")
+    elif step["type"] not in {"ARM", "GRIPPER"}:
+        raise ContractError("CONTACT_PREFIX_UNSUPPORTED")
     report = transport.check_contact_segment(plan, step, snapshot, context, closing=is_close)
-    return {"segment_digest": canonical_digest(step), "start_observation": copy.deepcopy(observation),
-            "closing": is_close, "collision_report": report}
+    return {"plan_digest": canonical_digest(plan), "segment_digest": canonical_digest(step), "start_observation": copy.deepcopy(observation),
+            "closing": is_close, "command": command, "held": held, "collision_report": report}
 
 
 def completed(transport, plan, step, observation, context, pending):
     from tools.data_factory.rollout.gripper_evidence import check_transition
-    check_transition(pending["start_observation"], observation, command=pending["closing"])
+    check_transition(pending["start_observation"], observation, command=pending["command"])
     if pending["segment_digest"] != canonical_digest(step):
         raise ContractError("CONTACT_PREFIX_BINDING")
     record = {**pending, "terminal_observation": copy.deepcopy(observation)}
+    if pending["command"]:
+        from tools.data_factory.rollout.gripper_evidence import native_selected_command
+        record["native_command"] = native_selected_command(observation["snapshot"]["gripper_controller"]["hardware_execution"]["wire"],
+            plan["learned_source_program"]["gripper_requirements"], context["open_m"])
     if pending["closing"]:
         from .mechanical_terminal import closure_plateau
         snapshot = observation["snapshot"]
-        evidence = closure_plateau(plan, snapshot, observation["captured_at_s"], observation["captured_monotonic_s"], endpoint=True)
+        evidence = closure_plateau(plan, snapshot, observation["captured_at_s"], observation["captured_monotonic_s"], endpoint=True, native_equivalence=True)
         start = pending["start_observation"]["snapshot"]["joint_positions"]
         tol = plan["planning"]["goal_tolerances"]["joint_rad"]
         if any(abs(a-b) > tol for a,b in zip(start, snapshot["joint_positions"])):
             raise ContractError("CONTACT_CLOSE_MOVED_ARM")
+        if pending["held"]:
+            context["close"]["completion"] = evidence
+            context["checked_segments"].append(record)
+            return
         gripper = transport.contact_fk(plan["learned_source_program"], snapshot, "gripper_link")
         relation = compose_rigid_transform(inverse_rigid_transform(gripper), context["datum"])
         # The initial pose need not survive symmetric closure laterally. Bound
@@ -183,6 +203,12 @@ def completed(transport, plan, step, observation, context, pending):
         context["close"] = {"record": record, "completion": evidence, "relation": relation}
         context["close"].update(envelope=envelope, envelope_dimensions_m=dimensions)
     context["checked_segments"].append(record)
+    if pending["closing"]:
+        from .moveit_transport import _rotation_quaternion
+        transport.prepare_mechanical_terminal(plan["learned_source_program"], {"carried_object": {
+            "object_id": plan["scene_binding"]["object_instance_id"], "link_name": "gripper_link", "touch_links": TIPS[:],
+            "dimensions_m": dimensions, "translation_m": envelope["translation_m"],
+            "rotation_xyzw": _rotation_quaternion(envelope["rotation_columns"])}})
 
 
 def consume(transport, plan, scene_object, snapshot, context):
@@ -199,11 +225,11 @@ def consume(transport, plan, scene_object, snapshot, context):
     if "sha256:" + hashlib.sha256(transport._robot_description.encode()).hexdigest() != plan["binding_digests"]["robot_description_digest"]:
         raise ContractError("CONTACT_MODEL_BINDING")
     close = context["close"]
-    check_transition(close["record"]["terminal_observation"], current, command=False)
-    completion = closure_plateau(plan, snapshot, now, steady, endpoint=True)
+    check_transition(context["checked_segments"][-1]["terminal_observation"], current, command=False)
+    completion = closure_plateau(plan, snapshot, now, steady, endpoint=True, native_equivalence=True)
     if completion["generation"] != close["completion"]["generation"]:
         raise ContractError("CONTACT_GENERATION")
-    before = close["record"]["terminal_observation"]["snapshot"]
+    before = context["checked_segments"][-1]["terminal_observation"]["snapshot"]
     if any(abs(a-b) > plan["planning"]["goal_tolerances"]["joint_rad"] for a,b in zip(before["joint_positions"], snapshot["joint_positions"])):
         raise ContractError("CONTACT_HELD_STATE_CHANGED")
     relation = validate_rigid_transform(close["envelope"], "CONTACT_RELATION")

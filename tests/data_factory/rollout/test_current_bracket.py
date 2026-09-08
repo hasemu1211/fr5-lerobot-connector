@@ -9,7 +9,7 @@ import unittest
 
 from tools.fr5_data_factory import ContractError
 from tools.data_factory.rollout.gripper_evidence import (
-    LIVE_FIELDS, CAUSAL_FIELDS, RESOURCE, check_hardware, decode_dynamic_state, native_clock_parameter, native_temporal_parameter,
+    LIVE_FIELDS, CAUSAL_FIELDS, SELECTED_FIELDS, RESOURCE, check_hardware, decode_dynamic_state, native_clock_parameter, native_temporal_parameter,
 )
 from tests.data_factory.rollout.test_gripper_evidence import patched_source, method
 
@@ -80,13 +80,42 @@ class CurrentBracketTest(unittest.TestCase):
 
     def test_completed_proof_survives_new_current_brackets_and_old_expiry(self):
         packet, binding = self.packet()
-        self.assertEqual(tuple(packet["names"]), CAUSAL_FIELDS)
+        self.assertEqual(tuple(packet["names"]), SELECTED_FIELDS)
         self.assertTrue(packet["proof_unchanged"])
         self.assertGreater(packet["renewed_arm_sends"], 0)
         evidence = self.evidence(packet, binding)
         self.assertGreater(evidence["captured_at_s"] - packet["wire"][44], .15)
         wire = check_hardware(evidence, evidence["captured_at_s"], evidence["captured_monotonic_s"], .08)
         self.assertEqual(wire["completed_generation"], 1)
+        self.assertEqual(wire["version"], 4)
+        self.assertEqual(wire["selected_generation"], wire["completed_generation"])
+        self.assertEqual(wire["selected_initial_percent"], 100)
+        self.assertEqual(wire["selected_upper_m"], .021)
+        self.assertEqual([wire[k] for k in SELECTED_FIELDS[-10:]], packet["sdk_tuple"])
+        archived = copy.deepcopy(evidence)
+        old = archived["snapshot"]["gripper_controller"]["hardware_execution"]
+        old["wire"] = {k: wire[k] for k in CAUSAL_FIELDS}
+        old["wire"]["version"] = 3
+        check_hardware(archived, evidence["captured_at_s"], evidence["captured_monotonic_s"], .08)
+
+    def test_actual_worker_same_integer_endpoint_keeps_distinct_direction_tuple(self):
+        from tools.data_factory.rollout.gripper_evidence import native_close_equivalence
+        required = {"command_position_m":.01176,"velocity_percent":20,"force_percent":20}
+        for mode, initial, selected in (("tuple_open",55,[10,50]),("tuple_close",56,[20,20])):
+            with self.subTest(mode=mode):
+                packet, binding = self.packet(mode)
+                evidence = self.evidence(packet,binding)
+                wire = check_hardware(evidence,evidence["captured_at_s"],evidence["captured_monotonic_s"],.08)
+                self.assertEqual(wire["raw_reference_m"],.01177)
+                self.assertEqual(wire["selected_position"],56)
+                self.assertEqual(wire["selected_initial_percent"],initial)
+                self.assertEqual(packet["sdk_tuple"][2:4],selected)
+                self.assertEqual([wire[k] for k in SELECTED_FIELDS[-10:]],packet["sdk_tuple"])
+                if mode=="tuple_open":
+                    with self.assertRaisesRegex(ContractError,"CONTACT_NATIVE_COMMAND_NOT_EQUIVALENT"):
+                        native_close_equivalence(wire,required,.021)
+                else:
+                    self.assertEqual(native_close_equivalence(wire,required,.021)["generation"],1)
 
     def test_native_missing_expired_wrong_sample_reset_and_stop_block(self):
         for mode in ("expired", "wrong_sample", "absent", "reset", "old_generation", "incomplete", "regressed", "stopped", "pre_ack", "terminal_wrong_generation", "terminal_wrong_reference",

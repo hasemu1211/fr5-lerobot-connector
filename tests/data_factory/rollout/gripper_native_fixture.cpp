@@ -63,7 +63,9 @@ struct Robot {
     }
     *p=state;return 0;
   }
-  int MoveGripper(int,int pos,int,int,int,int,int,int,int,int) {
+  std::array<int,10> sdk_tuple{};
+  int MoveGripper(int index,int pos,int velocity,int force,int max_time,int a5,int a6,int a7,int a8,int a9) {
+    sdk_tuple={index,pos,velocity,force,max_time,a5,a6,a7,a8,a9};
     ++moves;move_at=std::chrono::steady_clock::now();target=pos;if(move_hook)move_hook();
     if(clock_mode)std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
     return move_error;

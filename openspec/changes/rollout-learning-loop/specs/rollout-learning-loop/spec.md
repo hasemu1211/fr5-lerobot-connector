@@ -1160,6 +1160,28 @@ Release feasibility SHALL bind the qualified object-to-tool relation or a
 qualified conservative uncertainty envelope as well as current measured state.
 Gripper command completion alone SHALL NOT manufacture this relation.
 
+Prospective contact coverage SHALL precede the first bounded-task motion and
+every subsequent send, including interleaved continuous ARM/GRIPPER references.
+The source-bound initial object SHALL remain in collision checking until an
+admitted first-contact transition establishes a supported model-based carried
+envelope. Sampled model collision checks are not physical immobility evidence.
+Coverage and any carried relation SHALL continue only through exact validated
+predecessor chunks under the original Scene, Cell, grant and deadline.
+
+Native-equivalent close references SHALL retain their original numerical values,
+distinct command generations and completed-row indices. Equivalence SHALL consume
+the actual generation/acknowledgement-bound SDK selection, including its pinned
+upper position, worker-local initial feedback and full arguments, rather than
+inferring direction from an earlier caller sample or integer equality alone.
+Absent or inconsistent tuple evidence SHALL remain unavailable. Archived evidence
+versions SHALL retain their original meanings and exact protocol approvals.
+Reason 1 native endpoint completion and reason 2 calibrated plateau completion
+SHALL retain distinct meanings; plateau SHALL NOT become a mandatory extra gate.
+Unsupported contact evolution or opening SHALL stop before the next goal without
+truncating the policy output, declaring a partial chunk complete or handing off
+early. Partial-open, the existing command-start-relative hold, and full-open
+SHALL preserve the selected timing and speeds without an added arrival dwell.
+
 The existing recorder/diagnostic consumers SHALL distinguish learned Pick output
 and consumed rows from mechanical placement/reset. Mechanical completion SHALL
 NOT count as learned Place success, and a chunk boundary SHALL NOT manufacture

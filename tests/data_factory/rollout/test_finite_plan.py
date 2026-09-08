@@ -2,6 +2,7 @@
 import base64
 import copy
 import hashlib
+import math
 import threading
 import time
 import json
@@ -214,6 +215,33 @@ class Recorder:
 
 
 class FinitePlanTest(unittest.TestCase):
+    def setUp(self):
+        # Legacy lifecycle tests isolate contact just as they isolate planning.
+        # Prospective fixtures below always call the real producer and services.
+        from tools.data_factory.motion import contact_transition
+        real_before, real_completed = contact_transition.before, contact_transition.completed
+        def before(transport, plan, step, observation, context):
+            if not context.get("isolated_lifecycle_fixture"):
+                return real_before(transport, plan, step, observation, context)
+            return {"segment_digest": canonical_digest(step), "start_observation": copy.deepcopy(observation)}
+        def completed(transport, plan, step, observation, context, pending):
+            if not context.get("isolated_lifecycle_fixture"):
+                return real_completed(transport, plan, step, observation, context, pending)
+            context["checked_segments"].append({**pending, "terminal_observation": copy.deepcopy(observation)})
+        for name, value in (("before", before), ("completed", completed)):
+            patcher = mock.patch.object(contact_transition, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(Transport, "prepare_contact_transition", staticmethod(self.lifecycle_contact), create=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    @staticmethod
+    def lifecycle_contact(plan, scene_object, *, first, deadline_s):
+        return {"status": "PROSPECTIVE", "isolated_lifecycle_fixture": True,
+                "plan_digest": canonical_digest(plan), "scene_binding": copy.deepcopy(plan["scene_binding"]),
+                "deadline_s": deadline_s, "checked_segments": [], "close": None}
+
     def test_recorded4032_raw_output_retains_all_rows_and_rejects_limits(self):
         recorded = json.loads(Path(__file__).with_name("recorded4032.json").read_text())
         self.assertEqual(recorded["source_report_sha256"],
@@ -516,15 +544,51 @@ class FinitePlanTest(unittest.TestCase):
             wire.update(zip(CALENDAR, calendar(now[0] - .002)))
             if state["finished"]:
                 wire.update(zip(["completion_" + k for k in CALENDAR], calendar(state["finished"])))
+            names = FIELDS
+            if contact_fixture is not None:
+                from tools.data_factory.rollout.gripper_evidence import SELECTED_FIELDS, calendar_s
+                names = SELECTED_FIELDS
+                wire = {**dict.fromkeys(names, 0.), **wire, "version": 4.}
+                wire.update(current_valid=1., query_before_controller_s=now[0]-.006,
+                    query_after_controller_s=now[0], query_before_system_s=now[0]-.006,
+                    query_before_steady_s=now[0]-.006, query_after_system_s=now[0], query_after_steady_s=now[0],
+                    current_max_age_s=.1, host_clock_tolerance_s=.001, certificate_source_s=calendar_s(wire),
+                    certificate_sample_system_s=now[0], certificate_sample_steady_s=now[0],
+                    certificate_generation=state["generation"], sample_position_percent=round(state["feedback"]/.021*100))
+                for i in range(4):
+                    wire[f"certificate_incarnation_{i}"] = i+1
+                    wire[f"terminal_incarnation_{i}"] = i+1
+                if state["finished"]:
+                    end = state["finished"]
+                    wire.update(proof_valid=1., proof_system_s=end+.002, proof_steady_s=end+.002,
+                        ack_system_s=state["started"], ack_steady_s=state["started"],
+                        terminal_sample_system_s=end, terminal_sample_steady_s=end,
+                        terminal_position_percent=round(state["feedback"]/.021*100), terminal_motion_done=1.,
+                        terminal_query_before_controller_s=end-.004, terminal_query_after_controller_s=end+.002,
+                        terminal_query_before_system_s=end-.004, terminal_query_before_steady_s=end-.004,
+                        terminal_query_after_system_s=end+.002, terminal_query_after_steady_s=end+.002,
+                        terminal_max_age_s=.1, terminal_host_clock_tolerance_s=.001,
+                        terminal_reference_m=state["reference"], terminal_generation=state["generation"],
+                        selected_valid=1., selected_generation=state["generation"], selected_upper_m=.021,
+                        selected_initial_percent=state.get("initial_percent", 100), selected_index=1.,
+                        selected_position=math.floor(state["reference"]/.021*100+.5), selected_velocity=20.,
+                        selected_force=20., selected_max_time=30000., selected_arg5=1.)
+                    if wire["selected_position"] > wire["selected_initial_percent"]:
+                        wire.update(selected_velocity=10., selected_force=50.)
+                t._gripper_source_clock = {"schema_version":"fr5.gripper_temporal_policy.v1", "incarnation":[1,2,3,4],
+                    "max_age_s":.1, "host_clock_tolerance_s":.001}
             wire.update(state["hardware_override"])
             message = DynamicJointState(joint_names=[RESOURCE], interface_values=[InterfaceValue(
-                interface_names=list(FIELDS), values=[float(wire[k]) for k in FIELDS])])
+                interface_names=list(names), values=[float(wire[k]) for k in names])])
             # Real wire round trip and the actual native transport callback/decoder.
             t._on_gripper_hardware_state(deserialize_message(serialize_message(message), DynamicJointState))
             return t._gripper_hardware_evidence()
         class SyntheticTransport(RosMoveItTransport):
             """Synthetic clients only; retain production rejection of synthetic ROS runs."""
         t = object.__new__(SyntheticTransport)
+        if contact_fixture is None:
+            t.prepare_contact_transition = self.lifecycle_contact
+            t.mechanical_contact_context = lambda plan, scene, snapshot, **kw: RosMoveItTransport.mechanical_contact_context(t, plan, scene, snapshot)
         t._RobotTrajectory, t._JointTrajectoryPoint, t._Duration = RobotTrajectory, JointTrajectoryPoint, Duration
         t._ExecuteTrajectory, t._FollowJointTrajectory, t._JointTolerance = ExecuteTrajectory, FollowJointTrajectory, JointTolerance
         t._serialize_message, t._deserialize_message = serialize_message, deserialize_message
@@ -537,7 +601,8 @@ class FinitePlanTest(unittest.TestCase):
         t._rclpy = SimpleNamespace(spin_until_future_complete=lambda *a, **kw: None, spin_once=lambda *a, **kw: None)
         t.preflight, t.precommit_safety = T().preflight, T().precommit_safety
         def observe(*_):
-            value = snapshot(state["joints"][:], gripper_position=state["feedback"], force=20 if contact_fixture else 50)
+            value = snapshot(state["joints"][:], gripper_position=state["feedback"], force=20 if contact_fixture else 50,
+                             open_velocity=10 if contact_fixture else None, open_force=50 if contact_fixture else None)
             value["gripper_controller"]["reference_position_m"] = state["reference"]
             value["joint_state_age_s"] = state["age"]
             value["joint_state_stamp_ns"] = round(now[0] * 1e9)
@@ -563,6 +628,7 @@ class FinitePlanTest(unittest.TestCase):
         def send(goal):
             sent.append(goal)
             if isinstance(goal, FollowJointTrajectory.Goal):
+                state["initial_percent"] = round(state["feedback"]/.021*100)
                 state["generation"] += 1
                 state["started"] = now[0]
             state["complete"] = False
@@ -609,7 +675,8 @@ class FinitePlanTest(unittest.TestCase):
         calls, cell, scene = [], Cell(), Scene()
         if contact_fixture is not None:
             xml, scene = contact_fixture(src, t)
-            actions = [[arm_target] * 6 + [.01176]]
+            if recorded is None:
+                actions = getattr(t, "_fixture_actions", [[arm_target] * 6 + [.01176]])
             cell_read = cell.read
             cell.read = lambda: {**cell_read(), "robot_system_id": src["robot_system_id"]}
         executor = PickupExecutor(t, execution_enabled=True, cell_state_store=cell, scene_state_store=scene,
@@ -2227,9 +2294,8 @@ class FinitePlanTest(unittest.TestCase):
         for rejection in (None, "motion_done_only", "pending", "outside_range", "wrong_reference"):
             with self.subTest(rejection=rejection):
                 job, executor, native, state, now, sent, _, calls = self.make_held_job(mechanical=True)
-                # No replacement of mechanical_contact_context: the normal task
-                # boundary consumes native serialized hardware feedback below.
-                self.assertIs(native.mechanical_contact_context.__func__, RosMoveItTransport.mechanical_contact_context)
+                # Legacy diagnostic consumer, with prospective coverage isolated
+                # by the lifecycle fixture; no AVAILABLE relation is supplied.
                 source_program = job._program["source_program"]
                 grant = task_grant(source_program, SCENE, job._program["learned_proposal"],
                                    max_outputs=1, terminal_reserve_s=30.)
@@ -2281,6 +2347,69 @@ class FinitePlanTest(unittest.TestCase):
             with self.subTest(reason=reason):
                 self._native_mechanical_terminal_case(prospective=reason)
         self._native_mechanical_terminal_case("delayed_services", prospective=1)
+
+    def test_continuous_equivalent_references_reach_real_contact_and_release(self):
+        self._native_mechanical_terminal_case(prospective=1,
+            actions=[[.001]*6+[.01177], [.001]*6+[.01178], [.001]*6+[.01179]])
+
+    def test_real_contact_relation_survives_predecessor_bound_chunks(self):
+        self._native_mechanical_terminal_case(prospective=1, actions=[[.001]*6+[.01177]],
+            next_actions=[[.001]*6+[.01178],[.001]*6+[.01179]])
+
+    def test_continuous_contact_rejects_unbound_native_tuple_and_missing_coverage(self):
+        for failure in ("tuple_generation", "tuple_endpoint", "tuple_force", "tuple_velocity", "tuple_index",
+                        "tuple_max_time", "tuple_arg5", "tuple_missing", "coverage_removed", "changed_contact_scene"):
+            with self.subTest(failure=failure):
+                self._native_mechanical_terminal_case(failure, prospective=1)
+        self._native_mechanical_terminal_case("held_opening", prospective=1,
+            actions=[[.001]*6+[.01177],[.001]*6+[.0126]])
+
+    def test_carried_relation_survives_arm_only_suffix(self):
+        self._native_mechanical_terminal_case(prospective=1,
+            actions=[[.001]*6+[.01177],[.002]*6+[.01177]])
+
+    def test_actual8000_raw_output_topology_and_native_contact_boundaries(self):
+        from collections import Counter
+        data = json.loads(Path(__file__).with_name("recorded8000.json").read_text())
+        self.assertEqual(data["source_sha256"], "cf5d6fc6ba7ed27c3dbe1de2a15f7e34d2dd084c19509b11a726dab6f67837aa")
+        self.assertEqual(len(data["samples"]), 18)
+        xml = (Path(__file__).resolve().parents[3]/"src/fairino_description/urdf/fairino5_v6.urdf").read_text()
+        counts, built = Counter(), []
+        for sample in data["samples"]:
+            rows = sample["actions"]
+            self.assertEqual(len(rows), 50)
+            self.assertTrue(all(len(row)==7 and abs(row[6]-.01176)>1e-9 for row in rows))
+            self.assertEqual(sum(a[6]!=b[6] for a,b in zip([sample["initial_state"],*rows],rows)), 50)
+            obs = observation()
+            obs["observation.state"] = sample["initial_state"]
+            try:
+                p = FinitePolicyInference(lambda _: rows, CHECKPOINT, source_clock=lambda:10.).propose(
+                    obs, instruction="stored CPU replay", robot_description=xml, period_s=1/30, serialized_references=True)
+                src = source()
+                src["binding_digests"]["robot_description_digest"] = "sha256:"+hashlib.sha256(xml.encode()).hexdigest()
+                next(s for s in src["steps"] if s["phase"]=="GRIPPER_OPEN")["gripper_position_m"] = .021
+                plan = compile_program(src,p)
+                self.assertEqual(p["actions"],rows)
+                self.assertEqual([s["type"] for s in plan["steps"][0]["held_target_segments"]], ["ARM","GRIPPER"]*50)
+                built.append(sample)
+            except ContractError as exc:
+                counts[exc.code]+=1
+        self.assertEqual(counts, {"LEARNED_JOINT_LIMIT":12,"LEARNED_REFERENCE_HORIZON":3})
+        self.assertEqual([(s["episode_index"],s["frame_index"]) for s in built], [(27,568),(28,567),(32,467)])
+        # Only service geometry and hardware feedback are simulated. Every one
+        # of the 50 stored policy rows remains present, including rejected suffixes.
+        for sample in built:
+            with self.subTest(episode=sample["episode_index"]):
+                self._native_mechanical_terminal_case(prospective=1, recorded=(sample,xml,CHECKPOINT))
+
+    def test_native_task_without_contact_coverage_sends_zero_goals(self):
+        from tools.data_factory.motion.moveit_transport import RosMoveItTransport
+        job, executor, native, _, now, sent, *_ = self.make_held_job(mechanical=True)
+        native.prepare_contact_transition = RosMoveItTransport.prepare_contact_transition.__get__(native)
+        self.assertTrue(job.admit_task(task_grant(job._program["source_program"],SCENE,job._program["learned_proposal"]))["ok"])
+        with mock.patch('tools.data_factory.motion.moveit_transport.time.time',side_effect=lambda:now[0]):
+            self.assertEqual(job.start()["code"], "CONTACT_PROFILE_UNAVAILABLE")
+        self.assertEqual(sent, [])
 
     def test_closure_centering_envelope_contains_source_geometry_counterexample(self):
         from tools.data_factory.motion.contact_transition import prepare, lateral_envelope
@@ -2337,6 +2466,8 @@ class FinitePlanTest(unittest.TestCase):
         (directory / "synthetic-contact-only.json").write_text(json.dumps(q))
         src["binding_digests"]["motion_qualification"] = canonical_digest(q)
         src["gripper_requirements"] = copy.deepcopy(docs["grasp_profile"]["gripper_close"])
+        src["gripper_requirements"].update(open_velocity_percent=docs["grasp_profile"]["gripper_open"]["velocity_percent"],
+                                           open_force_percent=docs["grasp_profile"]["gripper_open"]["force_percent"])
         src["robot_system_id"] = docs["robot_system"]["robot_system_id"]
         src["planning"]["max_joint_state_age_s"] = .1
         cal = validate_cell_calibration_document(docs["cell_calibration"], yaw0=docs["yaw0_sheet"],
@@ -2364,7 +2495,7 @@ class FinitePlanTest(unittest.TestCase):
             with self.subTest(failure=failure):
                 self._native_mechanical_terminal_case(failure)
 
-    def _native_mechanical_terminal_case(self, failure=None, prospective=False):
+    def _native_mechanical_terminal_case(self, failure=None, prospective=False, recorded=None, actions=None, next_actions=None):
         """Explicit simulated contact/FK services; never a live qualification."""
         from moveit_msgs import msg, srv
         from geometry_msgs.msg import Pose, PoseStamped
@@ -2372,8 +2503,16 @@ class FinitePlanTest(unittest.TestCase):
         from shape_msgs.msg import SolidPrimitive
         from trajectory_msgs.msg import JointTrajectoryPoint
         from rclpy.serialization import serialize_message
+        def contact_fixture(src, transport):
+            value = self.prospective_contact_fixture(src, transport)
+            if actions is not None:
+                transport._fixture_actions = actions
+                for step in src["steps"]:
+                    if step["phase"] == "SAFE_POSE_PTP":
+                        step["limits"]["execution_timeout_s"] = 10.
+            return value
         job, executor, transport, state, now, sent, _, calls = self.make_held_job(mechanical=True, max_observation_age_s=.3,
-            contact_fixture=self.prospective_contact_fixture if prospective else None)
+            recorded=recorded, contact_fixture=contact_fixture if prospective else None)
         for name in ("CollisionObject", "PlanningScene", "PlanningSceneComponents", "RobotState"):
             setattr(transport, "_"+name, getattr(msg,name))
         for name in ("ApplyPlanningScene", "GetPlanningScene", "GetStateValidity"):
@@ -2409,7 +2548,7 @@ class FinitePlanTest(unittest.TestCase):
                 if prospective and "cube-1" in world and not attached:
                     if failure == "earlier_contact":
                         return srv.GetStateValidity.Response(valid=False)
-                    if request.robot_state.joint_state.position[-1] < .02:
+                    if recorded is None and request.robot_state.joint_state.position[-1] < .02:
                         contact = msg.ContactInformation()
                         contact.header.frame_id = "base_link"
                         contact.contact_body_1, contact.body_type_1 = "cube-1", contact.WORLD_OBJECT
@@ -2495,6 +2634,13 @@ class FinitePlanTest(unittest.TestCase):
                 sample["valid_until_s"] -= 1.
             return sample
         transport.capture_scene_illumination = capture_illumination
+        if failure == "coverage_removed":
+            decode = transport._compiled_execution_goal
+            def remove_coverage(step):
+                result = decode(step)
+                executor.runs["run"]["execution"].pop("prospective_contact",None)
+                return result
+            transport._compiled_execution_goal = remove_coverage
         if failure == "expired_during_decode":
             decode = transport._compiled_execution_goal
             def delayed_decode(step):
@@ -2503,7 +2649,7 @@ class FinitePlanTest(unittest.TestCase):
                     now[0] += .4
                 return result
             transport._compiled_execution_goal = delayed_decode
-        def simulated_contact(plan,scene,snapshot):
+        def simulated_contact(plan,scene,snapshot, **kwargs):
             context={"status":"AVAILABLE","semantics":"MODEL_BASED_EXPECTATION","physical_success":False,
                 "source_program_digest":canonical_digest(plan["learned_source_program"]),
                 "snapshot_digest":canonical_digest(snapshot),"scene_binding":copy.deepcopy(plan["scene_binding"]),
@@ -2521,11 +2667,11 @@ class FinitePlanTest(unittest.TestCase):
         original=copy.deepcopy(executor.runs["run"]["plan"])
         if failure == "geometry":
             transport._robot_description += " "
-        grant=task_grant(job._program["source_program"],SCENE,original["learned_proposal"],max_outputs=1,terminal_reserve_s=30.)
+        grant=task_grant(job._program["source_program"],SCENE,original["learned_proposal"],max_outputs=2 if next_actions else 1,terminal_reserve_s=30.)
         self.assertTrue(job.admit_task(grant)["ok"])
         with mock.patch('tools.data_factory.motion.moveit_transport.time.time',side_effect=lambda:now[0]):
             started = job.start()
-            if failure in {"earlier_contact", "geometry"}:
+            if failure in {"earlier_contact", "geometry", "coverage_removed"}:
                 self.assertFalse(started["ok"])
                 self.assertEqual(sent, [])
                 return
@@ -2540,10 +2686,20 @@ class FinitePlanTest(unittest.TestCase):
                     point=goal.trajectory.points[-1]
                     value=point.positions[0]
                     state.update(reference=value,feedback=value)
+                    if recorded is not None or actions is not None:
+                        state["feedback"] = math.floor(value/.021*100+.5)*.021/100
+                        state["hardware_override"]["completion_reason"] = 1.
                     if prospective and value == .01176:
                         state["hardware_override"]["completion_reason"] = float(prospective)
                         if prospective == 2:
                             state["feedback"] = .01218
+                        changes = {"tuple_generation":("selected_generation",99.), "tuple_endpoint":("selected_position",55.),
+                            "tuple_force":("selected_force",50.), "tuple_velocity":("selected_velocity",10.),
+                            "tuple_index":("selected_index",2.), "tuple_max_time":("selected_max_time",10000.),
+                            "tuple_arg5":("selected_arg5",0.), "tuple_missing":("selected_valid",0.)}
+                        if failure in changes:
+                            key,value = changes[failure]
+                            state["hardware_override"][key] = value
                 duration=point.time_from_start.sec+point.time_from_start.nanosec/1e9+.002
                 while duration>.2:
                     now[0]=round(now[0]+.2,9)
@@ -2553,14 +2709,56 @@ class FinitePlanTest(unittest.TestCase):
                         self.assertIs(sent[-1], goal)
                 now[0]=round(now[0]+duration,9)
                 state["complete"]=True
+                if failure == "changed_contact_scene":
+                    world.pop("cube-1",None)
                 return job.poll()
             while job.state != "LEARNED_CHUNK_COMPLETE":
                 completed=complete_goal()
+                if failure and failure.startswith("tuple_") or failure in {"changed_contact_scene","held_opening"}:
+                    if not completed["ok"]:
+                        self.assertEqual(len(sent), 1 if failure=="changed_contact_scene" else 3 if failure=="held_opening" else 2)
+                        self.assertNotIn("mechanical_terminal",executor.runs["run"])
+                        self.assertIn(("recorder","retain"),calls)
+                        return
+                if recorded is not None and not completed["ok"]:
+                    self.assertEqual(completed["code"], "CONTACT_HELD_EVOLUTION_UNSUPPORTED")
+                    self.assertEqual(executor.runs["run"]["plan"], original)
+                    trace = executor._execution_data(executor.runs["run"])["learned_execution"]
+                    self.assertLess(len(trace["reference_consumption"]["completed_row_indices"]), 50)
+                    self.assertEqual(original["learned_proposal"]["actions"], recorded[0]["actions"])
+                    self.assertLess(len(sent), 100)
+                    self.assertNotIn("mechanical_terminal", executor.runs["run"])
+                    return
                 if failure in {"nonfinger_contact", "failed_constraint", "empty_contact", "wrong_body_type", "close_pose"}:
                     self.assertFalse(completed["ok"])
                     self.assertEqual(len(sent), 1)
                     return
                 self.assertTrue(completed["ok"],completed["code"])
+            if next_actions is not None:
+                transaction, lease = job.transaction_id, job.lease_id
+                old_context = copy.deepcopy(executor.runs["run"]["execution"]["prospective_contact"])
+                obs = observation()
+                obs["observation.state"] = [*state["joints"],state["feedback"]]
+                obs["source_timestamps_s"] = dict.fromkeys(("state","camera1","camera2"),now[0])
+                p = FinitePolicyInference(lambda _:next_actions,CHECKPOINT,source_clock=lambda:now[0]).propose(obs,
+                    instruction="synthetic probe",robot_description=transport._robot_description,period_s=1/30,
+                    max_observation_age_s=.3,serialized_references=True)
+                built = compile_program(original["learned_source_program"],p)
+                prepared = job.prepare_next_learned(built)
+                self.assertTrue(prepared["ok"],prepared["code"])
+                self.assertTrue(job.admit_task()["ok"])
+                started = job.start_next_learned()
+                self.assertTrue(started["ok"],started["code"])
+                self.assertEqual((transaction,lease),(job.transaction_id,job.lease_id))
+                history = executor.runs["run"]["learned_history"]
+                self.assertEqual(history[-1]["plan_envelope"]["plan"],original)
+                self.assertEqual(executor.runs["run"]["execution"]["prospective_contact"]["close"],old_context["close"])
+                original = copy.deepcopy(executor.runs["run"]["plan"])
+                while job.state != "LEARNED_CHUNK_COMPLETE":
+                    result = complete_goal()
+                    self.assertTrue(result["ok"],result["code"])
+                self.assertEqual(original["learned_proposal"]["actions"],next_actions)
+                self.assertEqual(state["generation"],3)
             learned_count=len(sent)
             if failure == "wrong_generation":
                 state["generation"] += 1
@@ -2577,6 +2775,12 @@ class FinitePlanTest(unittest.TestCase):
                     return result
                 job.recorder_call=revoke_on_freeze
             result=job.task_boundary()
+            if recorded is not None:
+                self.assertFalse(result["ok"])
+                self.assertEqual(len(sent), 100)
+                self.assertEqual(original["learned_proposal"]["actions"], recorded[0]["actions"])
+                self.assertNotIn("mechanical_terminal", executor.runs["run"])
+                return
             if failure in {"wrong_generation", "stale_state", "absent_relation"}:
                 self.assertFalse(result["ok"])
                 self.assertEqual(len(sent), learned_count)
@@ -2592,7 +2796,7 @@ class FinitePlanTest(unittest.TestCase):
                 return
             self.assertEqual(result["code"],"MECHANICAL_TERMINAL_STARTED")
             self.assertEqual(job.recorder_state,"FROZEN")
-            self.assertEqual(starts[0],[.001]*6)
+            self.assertEqual(starts[0],original["learned_proposal"]["actions"][-1][:6])
             for index in range(6):
                 if failure=="incarnation" and index==0:
                     state["hardware_override"]["incarnation_0"]=99.

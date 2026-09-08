@@ -41,6 +41,49 @@ CAUSAL_FIELDS = LIVE_FIELDS + (
     "terminal_reference_m", "terminal_generation", "terminal_incarnation_0", "terminal_incarnation_1", "terminal_incarnation_2", "terminal_incarnation_3",
 )
 
+# v4 appends the actual SDK selection. Archived causal v3 fields retain meaning.
+SELECTED_FIELDS = CAUSAL_FIELDS + (
+    "selected_valid", "selected_generation", "selected_upper_m", "selected_initial_percent",
+    "selected_index", "selected_position", "selected_velocity", "selected_force", "selected_max_time",
+    "selected_arg5", "selected_arg6", "selected_arg7", "selected_arg8", "selected_arg9",
+)
+
+
+def native_selected_command(wire, required, upper, *, qualified_close=False):
+    """Compare an acknowledged SDK selection, not two raw policy coordinates.
+
+    Index 1 and max_time 30000 are the existing native configuration baseline;
+    alternate installations cannot inherit this equivalence. Fixed arguments
+    are the existing MoveGripper call, not new controller settings.
+    """
+    if wire.get("version") != 4 or wire.get("selected_valid") != 1:
+        raise ContractError("CONTACT_NATIVE_SELECTED_TUPLE_UNAVAILABLE")
+    target = wire["raw_reference_m"]
+    if not 0 <= target <= upper or wire["selected_upper_m"] != upper:
+        raise ContractError("CONTACT_NATIVE_UPPER_BINDING")
+    endpoint = math.floor(100 * target / upper + .5)
+    qualified = math.floor(100 * required["command_position_m"] / upper + .5)
+    initial = integer(wire["selected_initial_percent"], 100)
+    opening = endpoint > initial
+    velocity = required.get("open_velocity_percent", required["velocity_percent"]) if opening else required["velocity_percent"]
+    force = required.get("open_force_percent", required["force_percent"]) if opening else required["force_percent"]
+    expected = [1, endpoint, velocity, force, 30000, 1, 0, 0, 0, 0]
+    keys = ("index", "position", "velocity", "force", "max_time", "arg5", "arg6", "arg7", "arg8", "arg9")
+    actual = [wire["selected_" + key] for key in keys]
+    if (wire["selected_generation"] != wire["generation"] or wire["completed_generation"] != wire["generation"]
+            or wire["ack_system_s"] < wire["command_started_system_s"] or wire["ack_steady_s"] <= 0):
+        raise ContractError("CONTACT_NATIVE_GENERATION")
+    if actual != expected or qualified_close and (endpoint != qualified or opening):
+        raise ContractError("CONTACT_NATIVE_COMMAND_NOT_EQUIVALENT")
+    return {"kind": "NATIVE_COMMAND_EQUIVALENCE" if qualified_close else "NATIVE_COMMAND_SELECTION", "raw_reference_m": target,
+            "generation": wire["generation"], "selected_tuple": actual,
+            "upper_position_m": upper, "initial_position_percent": wire["selected_initial_percent"],
+            "qualified_reference_m": required["command_position_m"], "physical_success": False}
+
+
+def native_close_equivalence(wire, required, upper):
+    return native_selected_command(wire, required, upper, qualified_close=True)
+
 
 def validate_temporal_policy(policy):
     """Live owner-selected bounds, not a calendar-offset estimate or approval."""
@@ -136,7 +179,7 @@ def decode_dynamic_state(message, binding, received_steady_s):
             raise ValueError()
         values = message.interface_values[names.index(RESOURCE)]
         fields = list(values.interface_names)
-        if len(fields) != len(set(fields)) or set(fields) not in (set(FIELDS), set(LIVE_FIELDS), set(CAUSAL_FIELDS)) or len(fields) != len(values.values):
+        if len(fields) != len(set(fields)) or set(fields) not in (set(FIELDS), set(LIVE_FIELDS), set(CAUSAL_FIELDS), set(SELECTED_FIELDS)) or len(fields) != len(values.values):
             raise ValueError()
         wire = dict(zip(fields, values.values))
         for value in wire.values():
@@ -214,11 +257,11 @@ def check_hardware(evidence, now, steady_now, max_age_s, *, completion=False, al
         if not isinstance(hw, dict) or set(hw) != {"wire", "clock_binding", "received_steady_s"}:
             raise ValueError()
         wire = hw["wire"]
-        if not isinstance(wire, dict) or set(wire) != set(CAUSAL_FIELDS if wire.get("version") == 3 else LIVE_FIELDS if wire.get("version") == 2 else FIELDS):
+        if not isinstance(wire, dict) or set(wire) != set(SELECTED_FIELDS if wire.get("version") == 4 else CAUSAL_FIELDS if wire.get("version") == 3 else LIVE_FIELDS if wire.get("version") == 2 else FIELDS):
             raise ValueError()
         for value in wire.values():
             number(value)
-        mapping = (validate_temporal_policy if wire.get("version") == 3 else validate_clock_binding)(hw["clock_binding"])
+        mapping = (validate_temporal_policy if wire.get("version") in (3, 4) else validate_clock_binding)(hw["clock_binding"])
         if not any(identity(wire)) or identity(wire) != mapping["incarnation"]:
             raise ContractError("LEARNED_HARDWARE_INCARNATION")
         for key in ("generation", "active_generation", "completed_generation"):
@@ -227,7 +270,7 @@ def check_hardware(evidence, now, steady_now, max_age_s, *, completion=False, al
         integer(wire["completion_reason"], 2)
         for key in ("pending", "rpc_active", "arm_resumed", "stopped", "valid"):
             integer(wire[key], 1)
-        if wire["version"] not in (1, 2, 3) or wire["valid"] != 1:
+        if wire["version"] not in (1, 2, 3, 4) or wire["valid"] != 1:
             raise ContractError("LEARNED_HARDWARE_INVALID")
         if wire["stopped"] or wire["error"]:
             raise ContractError("LEARNED_HARDWARE_UNRESOLVED")
@@ -256,7 +299,7 @@ def check_hardware(evidence, now, steady_now, max_age_s, *, completion=False, al
                 raise ContractError("LEARNED_HARDWARE_STALE")
         if not 0 <= now - wire["sample_system_s"] <= max_age_s:
             raise ContractError("LEARNED_HARDWARE_STALE")
-        if wire["version"] == 3:
+        if wire["version"] in (3, 4):
             if (wire["current_max_age_s"] != mapping["max_age_s"]
                     or wire["host_clock_tolerance_s"] != mapping["host_clock_tolerance_s"]
                     or wire["sample_fault"] != 0):
@@ -280,8 +323,10 @@ def check_hardware(evidence, now, steady_now, max_age_s, *, completion=False, al
         else:
             if wire["completed_generation"] != generation or wire["completion_reason"] not in (1, 2):
                 raise ContractError("LEARNED_HARDWARE_COMPLETION")
-            if wire["version"] == 3:
+            if wire["version"] in (3, 4):
                 check_causal_command_proof(wire, now, steady_now, max_age_s, completion=completion)
+                # Selected-command authority is consumed separately. An absent
+                # tuple must not destroy otherwise valid diagnostic telemetry.
                 return wire
             if wire["version"] == 2:
                 # Revalidate the original proof at its recorded instant, not now.

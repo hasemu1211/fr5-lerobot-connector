@@ -8,6 +8,12 @@ int main(int argc, char **argv) {
   h._pending_gripper_position.reset(); h._gripper_command_generation=0;
   h._last_gripper_command=.021; h._jnt_position_command[6]=.021; h._arm_stream_paused=false;
   r.clock_mode=true; r.sampler_only=true; r.sampler_thread=std::this_thread::get_id(); h._gripper_max_time=120;
+  const bool tuple_case=mode=="tuple_open" || mode=="tuple_close";
+  if(tuple_case) {
+    r.state.gripper_position=mode=="tuple_open" ? 55 : 56;
+    h._gripper_velocity=20;h._gripper_force=20;h._gripper_open_velocity=10;h._gripper_open_force=50;
+    h._gripper_max_time=30000;mode="fresh";
+  }
   std::istringstream input(argv[2]);std::string value;
   while(std::getline(input,value,','))h.node->parameter.values.push_back(std::stod(value));
   if(mode=="command_99") {r.terminal_scenario=4;h._last_gripper_command=.015;h._jnt_position_command[6]=.015;}
@@ -46,7 +52,7 @@ int main(int argc, char **argv) {
   if(mode=="command_error") r.move_error=12;
   if(mode=="command_policy_change") h.node->parameter.values[5]*=2.;
   if(mode=="command_late_resume") r.resume_hook=[]{std::this_thread::sleep_for(std::chrono::milliseconds(130));};
-  h._jnt_position_command[6]=mode=="command_99" ? .021 : .01176;
+  h._jnt_position_command[6]=tuple_case ? .01177 : mode=="command_99" ? .021 : .01176;
   if(mode=="expiry_first" || mode=="expiry_during" || mode.find("command_")==0) {
     if(mode=="command_settled") {
       const auto until=std::chrono::steady_clock::now()+std::chrono::milliseconds(h._gripper_max_time+200);
@@ -109,5 +115,7 @@ int main(int argc, char **argv) {
   for(size_t i=0;i<good.size();++i){if(i)std::cout<<",";std::cout<<good[i];}
   std::cout<<"],\"names\":[";
   for(size_t i=0;i<GripperExecutionEvidence::names.size();++i){if(i)std::cout<<",";std::cout<<"\""<<GripperExecutionEvidence::names[i]<<"\"";}
+  std::cout<<"],\"sdk_tuple\":[";
+  for(size_t i=0;i<r.sdk_tuple.size();++i){if(i)std::cout<<",";std::cout<<r.sdk_tuple[i];}
   std::cout<<"],\"proof_unchanged\":true,\"renewed_arm_sends\":"<<r.arm_sends-before<<"}\n";
 }

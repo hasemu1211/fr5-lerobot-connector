@@ -1235,6 +1235,17 @@ class PickupExecutor:
                 # next exact plan's predecessor digest. Never nest earlier history.
                 history = [*run.get("learned_history", []), candidate["previous_chunk"]]
                 candidate = {key: value for key, value in candidate.items() if key != "previous_chunk"}
+                contact = execution.get("prospective_contact")
+                if "task_grant" in run:
+                    from tools.data_factory.rollout.finite_plan import validate_execution_history
+                    validate_execution_history(candidate["plan"], history)
+                    if (not contact or contact.get("status") != "PROSPECTIVE"
+                            or contact["plan_digest"] != canonical_digest(run["plan"])
+                            or contact["scene_binding"] != candidate["plan"]["scene_binding"]
+                            or contact["deadline_s"] != run["task_grant"]["deadline_s"]):
+                        raise ContractError("CONTACT_CONTINUATION_BINDING")
+                    contact = copy.deepcopy(contact)
+                    contact["plan_digest"] = canonical_digest(candidate["plan"])
                 try:
                     self.cell_state_store.mark_blocked("EXECUTION_IN_PROGRESS", payload["run_id"], candidate["digest"],
                                                        expected_state_digest=canonical_digest(cell), blocking=False)
@@ -1250,6 +1261,8 @@ class PickupExecutor:
                         next_execution[key] = execution[key]
                 next_execution.update(step_index=0, grasp_verdict=None, semantic_verdict=None, release_verdict=None,
                                       snapshot=None, active=False, terminal_phases=[])
+                if contact is not None:
+                    next_execution["prospective_contact"] = contact
                 task_authority = {key: run[key] for key in ("task_grant", "task_deadline", "task_revoked") if key in run}
                 cancel = run["cancel_event"]
                 run.clear()
@@ -1482,11 +1495,18 @@ class PickupExecutor:
             data["failure_code"] = run["failure_code"]
         return data
 
-    def _check_learned_dispatch(self, run, deadlines=None):
+    def _check_learned_dispatch(self, run, deadlines=None, *, require_contact=False):
         self._check_task(run)
         if "task_grant" in run and "mechanical_terminal" not in run and run["execution"].get("learned_segment_index", 0) == 0 and not self._task_policy_window(run):
             raise ContractError("TASK_POLICY_BUDGET_EXHAUSTED")
         execution = run["execution"]
+        if require_contact and "task_grant" in run:
+            context, pending = execution.get("prospective_contact", {}), execution.get("contact_pending", {})
+            step = self._active_steps(run)[execution["step_index"]]
+            step = step.get("held_target_segments", [step])[execution.get("learned_segment_index", 0)]
+            if (context.get("status") != "PROSPECTIVE" or context.get("plan_digest") != canonical_digest(run["plan"])
+                    or pending.get("segment_digest") != canonical_digest(step)):
+                raise ContractError("CONTACT_COVERAGE_UNAVAILABLE")
         if run["cancel_event"].is_set():
             raise ContractError(execution.get("_scene_dispatch_fault", "LEARNED_CANCELLED"))
         if run["state"] != "EXECUTING":
@@ -1652,13 +1672,17 @@ class PickupExecutor:
                     resolved_step = execution_step(step, run["plan"]["learned_proposal"])
                     check_execution_start(resolved_step, evidence, self.source_clock(), steady_now=self.monotonic_clock())
                     execution["learned_start_observation"] = evidence
-                    if "task_grant" in run and hasattr(self.transport, "prepare_contact_transition"):
+                    if "task_grant" in run:
+                        if not hasattr(self.transport, "prepare_contact_transition"):
+                            raise ContractError("CONTACT_COVERAGE_UNAVAILABLE")
                         if "prospective_contact" not in execution:
                             execution["prospective_contact"] = self.transport.prepare_contact_transition(
                                 run["plan"], execution["scene_object"],
                                 first=not run.get("learned_history") and not execution.get("learned_segments"),
                                 deadline_s=run["task_grant"]["deadline_s"])
                         context = execution["prospective_contact"]
+                        if context.get("status") != "PROSPECTIVE":
+                            raise ContractError(context.get("code", "CONTACT_COVERAGE_UNAVAILABLE"))
                         if context.get("status") == "PROSPECTIVE":
                             from tools.data_factory.motion.contact_transition import before
                             execution["contact_pending"] = before(self.transport, run["plan"], step, evidence, context)
@@ -1672,6 +1696,8 @@ class PickupExecutor:
                             check_execution_start(resolved_step, fresh, self.source_clock(), steady_now=self.monotonic_clock())
                             if any(abs(a-b) > tolerance for a,b in zip(observed["joint_positions"], fresh["snapshot"]["joint_positions"])):
                                 raise ContractError("CONTACT_CHECK_MOVED_ARM")
+                            if observed["gripper_controller"]["feedback_position_m"] != fresh["snapshot"]["gripper_controller"]["feedback_position_m"]:
+                                raise ContractError("CONTACT_CHECK_MOVED_GRIPPER")
                             execution["contact_pending"]["checked_start_observation"] = evidence
                             execution["contact_pending"]["start_observation"] = fresh
                             evidence = fresh
@@ -1686,9 +1712,9 @@ class PickupExecutor:
                 execution["active"] = True
                 self._emit_phase_event(run, "DISPATCH_REQUESTED", step, "REQUESTED", {"step": step})
                 if step["phase"] == "LEARNED_CHUNK":
-                    self._check_learned_dispatch(run, deadlines)
+                    self._check_learned_dispatch(run, deadlines, require_contact=True)
                     self.transport.start_phase(resolved_step, cancel_event=run["cancel_event"], cancel_timeout_s=run["plan"]["execution_timeouts_s"]["cancel"],
-                                               dispatch_guard=lambda: self._check_learned_dispatch(run, deadlines), **options)
+                                               dispatch_guard=lambda: self._check_learned_dispatch(run, deadlines, require_contact=True), **options)
                     if run["state"] != "EXECUTING" or run["cancel_event"].is_set():
                         return run["state"]
                 else:
