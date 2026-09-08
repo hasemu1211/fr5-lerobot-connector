@@ -308,7 +308,7 @@ class FinitePlanTest(unittest.TestCase):
             self.assertEqual(plan["learned_proposal"]["runtime_inputs"]["clock_binding"], clock_binding)
             self.assertEqual(result["data"]["task_effectiveness"], "UNKNOWN")
 
-    def make_held_job(self, initial_feedback=.021, *, controller_samples=True):
+    def make_held_job(self, initial_feedback=.021, *, controller_samples=True, arm_target=.001):
         # Reuse this file's lifecycle fixtures with the actual ROS serializers,
         # action dispatch, polling and cancellation; no ROS node is constructed.
         from builtin_interfaces.msg import Duration
@@ -425,7 +425,7 @@ class FinitePlanTest(unittest.TestCase):
                 step["limits"]["completion_tolerance_m"] = .01218 - .01176
         obs = observation()
         obs["observation.state"] = [0.] * 6 + [initial_feedback]
-        actions = [[0.] * 6 + [.021] for _ in range(4)] + [[.001] * 6 + [.01176] for _ in range(8)]
+        actions = [[0.] * 6 + [.021] for _ in range(4)] + [[arm_target] * 6 + [.01176] for _ in range(8)]
         calls, cell, scene = [], Cell(), Scene()
         executor = PickupExecutor(t, execution_enabled=True, cell_state_store=cell, scene_state_store=scene,
                                   source_clock=lambda: now[0], monotonic_clock=lambda: now[0])
@@ -1085,11 +1085,11 @@ class FinitePlanTest(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "COLLISION_DETECTED"):
             t._check_plan_collision(plan, .021)
 
-    def held_phase_events(self):
+    def held_phase_events(self, *, arm_target=.001, start_time=10., sequence_start=0):
         from tools.data_factory.quality.phase_events import validate_phase_event
-        _, executor, _, _, _, _, _, _ = self.make_held_job()
+        _, executor, _, _, _, _, _, _ = self.make_held_job(arm_target=arm_target)
         run = executor.runs["run"]
-        run["execution"] = {"phase_event_sequence": 0, "step_index": 0}
+        run["execution"] = {"phase_event_sequence": sequence_start, "step_index": 0}
         events, rows, clock = [], [], [10.]
         def emit(record):
             events.append(validate_phase_event(record, plan=run["plan"]))
@@ -1098,13 +1098,107 @@ class FinitePlanTest(unittest.TestCase):
         executor.event_clock = lambda: (int(clock[0] * 1e9), "SYSTEM_TIME")
         for index, step in enumerate(run["plan"]["steps"][0]["held_target_segments"]):
             run["execution"]["learned_segment_index"] = index
-            clock[0] = 10. + index * 2
+            clock[0] = start_time + index * 2
             executor._emit_phase_event(run, "GOAL_ACCEPTED", step, "ACCEPTED", {"step": step, "accepted": True})
             rows.extend({"target_ros_s": clock[0] + (j + 1) / (index + 2)} for j in range(index + 1))
             clock[0] += 1.
             executor._emit_phase_event(run, "ACTION_TERMINAL", step, "SUCCEEDED", {"step": step, "terminal_status": "SUCCEEDED"})
         self.assertEqual(len(events), 6)
         return run["plan"], events, rows
+
+    def test_multi_plan_phase_rows_preserve_both_chunks_in_existing_consumers(self):
+        from tools.data_factory.quality.phase_events import read_phase_events, validate_phase_event_sequence
+        from tools.data_factory.quality.phase_metrics import phase_row_windows, phase_timing_attribute
+        from tools.data_factory.quality.execution_metrics import joint_execution_attribute
+        from tools.data_factory.quality.interaction_metrics import interaction_quality_attribute
+        from tools.data_factory.quality.episode_report import aggregate_episode_report
+        first, a, ar = self.held_phase_events()
+        second, b, br = self.held_phase_events(arm_target=.002, start_time=20., sequence_start=len(a))
+        plans = {canonical_digest(p): p for p in (first, second)}
+        events, rows = a + b, ar + br
+        original = copy.deepcopy((plans, events, rows))
+        for row in rows:
+            p, start = (first, 10.) if row["target_ros_s"] < 20. else (second, 20.)
+            segment = int((row["target_ros_s"] - start) // 2)
+            target = p["steps"][0]["held_target_segments"][segment]["final_joint_state"]
+            row.update({"observation.state": [*target, .012], "action": [*target, .012]})
+        self.assertEqual(validate_phase_event_sequence(events, plans=plans), events)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "phase_events.jsonl"
+            path.write_text("".join(json.dumps(event) + "\n" for event in events))
+            self.assertEqual(read_phase_events(path, plans=plans), events)
+        windows, flags, _ = phase_row_windows(events=events, recorder_rows=rows, recorder_ros_clock_type="SYSTEM_TIME", plans=plans)
+        self.assertEqual(flags, [])
+        self.assertEqual([w["plan_digest"] for w in windows], [canonical_digest(first)] * 3 + [canonical_digest(second)] * 3)
+        self.assertEqual([len(w["row_indices"]) for w in windows], [1, 2, 3, 1, 2, 3])
+        self.assertEqual(sorted(i for w in windows for i in w["row_indices"]), list(range(12)))
+        for p in (first, second):
+            digest = canonical_digest(p)
+            common = dict(run_id="run", resolved_job_digest=p["resolved_job_digest"], plan_digest=digest, plan=p,
+                          plans=plans, events=events, recorder_rows=rows, recorder_rows_digest=canonical_digest(rows),
+                          recorder_ros_clock_type="SYSTEM_TIME")
+            timing = phase_timing_attribute(**common)
+            self.assertEqual(timing["plan_digest"], digest)
+            self.assertEqual(timing["status"], "AVAILABLE")
+            self.assertEqual(timing["metrics"]["joined_row_count"], 6)
+            self.assertEqual(timing["metrics"]["event_count"], 6)
+            self.assertEqual(timing["metrics"]["source_event_count"], 12)
+            self.assertEqual(timing["source_digests"]["pickup_plans"], canonical_digest(plans))
+            joints = joint_execution_attribute(**common, stall_epsilon_rad=1e-4)
+            self.assertEqual([item["segment_index"] for item in joints["metrics"]["phase_metrics"]], [0, 2])
+            self.assertEqual([item["endpoint_joint_error_max_rad"] for item in joints["metrics"]["phase_metrics"]], [0., 0.])
+            interaction = interaction_quality_attribute(**common, execution_evidence={"learned_execution": {"plan_digest": digest}})
+            self.assertEqual(interaction["status"], "NOT_AVAILABLE")
+            self.assertEqual(interaction["flags"], ["LEARNED_INTERACTION_UNQUALIFIED"])
+            report = aggregate_episode_report([timing, joints, interaction], technical_validator={
+                "schema_version": "data_factory.technical_validator_ref.v1", "status": "PASS",
+                "result_digest": canonical_digest("synthetic-technical-result")})
+            self.assertEqual(report["plan_digest"], digest)
+            self.assertEqual(len(report["attributes"]), 3)
+            self.assertIn("LEARNED_INTERACTION_UNQUALIFIED", report["flags"])
+            with self.assertRaisesRegex(ContractError, "INTERACTION_QUALITY_BINDING"):
+                interaction_quality_attribute(**common, execution_evidence={"learned_execution": {"plan_digest": canonical_digest("wrong")}})
+        self.assertEqual((plans, events), original[:2])
+
+    def test_multi_plan_event_lookup_rejects_missing_tampered_cross_run_and_replay(self):
+        from tools.data_factory.quality.phase_events import validate_phase_event_sequence
+        first, a, _ = self.held_phase_events()
+        second, b, _ = self.held_phase_events(arm_target=.002, start_time=20., sequence_start=len(a))
+        plans = {canonical_digest(p): p for p in (first, second)}
+        events = a + b
+        cases = [({canonical_digest(first): first}, "PHASE_EVENT_PLAN_BINDING"),
+                 ({canonical_digest(first): second}, "PHASE_EVENT_PLANS_BINDING"),
+                 ({}, "PHASE_EVENT_PLANS_BINDING")]
+        other = {**second, "run_id": "other-run"}
+        cases.append(({canonical_digest(first): first, canonical_digest(other): other}, "PHASE_EVENT_PLANS_BINDING"))
+        for lookup, code in cases:
+            with self.subTest(code=code), self.assertRaisesRegex(ContractError, code):
+                validate_phase_event_sequence(events, plans=lookup)
+        for malformed in ([], {}, None):
+            with self.subTest(malformed=malformed), self.assertRaisesRegex(ContractError, "PHASE_EVENT_PLAN_BINDING"):
+                validate_phase_event_sequence([{**a[0], "plan_digest": malformed}, *events[1:]], plans=plans)
+        with self.assertRaisesRegex(ContractError, "PHASE_EVENT_SEGMENT_DUPLICATE"):
+            validate_phase_event_sequence([*events, {**a[0], "sequence": 12}], plans=plans)
+        with self.assertRaisesRegex(ContractError, "PHASE_EVENT_PLAN_BINDING"):
+            validate_phase_event_sequence([{**a[0], "run_id": "other-run"}, *events[1:]], plans=plans)
+        with self.assertRaisesRegex(ContractError, "PHASE_EVENT_SEGMENT_BINDING"):
+            validate_phase_event_sequence([{**a[0], "evidence_digest": b[0]["evidence_digest"]}, *events[1:]], plans=plans)
+
+    def test_multi_plan_missing_terminal_never_joins_across_plan_boundaries(self):
+        from tools.data_factory.quality.phase_metrics import phase_row_windows, phase_intervals
+        first, a, ar = self.held_phase_events()
+        second, b, br = self.held_phase_events(arm_target=.002, start_time=20., sequence_start=len(a))
+        plans = {canonical_digest(p): p for p in (first, second)}
+        # Keep literal global sequence numbers. Another plan's terminal cannot
+        # finish the first plan's accepted segment, even when phase/index match.
+        events = [*a[:-1], *b]
+        intervals, flags, _ = phase_intervals(events, plans=plans)
+        self.assertIn("PHASE_TERMINAL_MISSING", flags)
+        self.assertTrue(all(item["duration_s"] == 1. for item in intervals))
+        windows, flags, _ = phase_row_windows(events=events, recorder_rows=ar+br,
+                                             recorder_ros_clock_type="SYSTEM_TIME", plans=plans)
+        self.assertEqual(windows, [])
+        self.assertIn("RECORDER_ROWS_NOT_JOINED", flags)
 
     def test_held_phase_event_identity_requires_exact_plan_and_unique_segments(self):
         from tools.data_factory.quality.phase_events import validate_phase_event_sequence, validate_phase_event

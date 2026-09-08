@@ -25,6 +25,7 @@ def joint_execution_attribute(
     resolved_job_digest: str,
     plan_digest: str,
     plan: Mapping[str, Any],
+    plans: Mapping[str, Mapping[str, Any]] | None = None,
     events: Sequence[Mapping[str, Any]],
     recorder_rows: Sequence[Mapping[str, Any]],
     recorder_rows_digest: str,
@@ -34,24 +35,30 @@ def joint_execution_attribute(
     """Report raw joint tracking/progress values; it does not admit or delete data."""
     if not DIGEST.fullmatch(recorder_rows_digest) or not math.isfinite(stall_epsilon_rad) or stall_epsilon_rad <= 0:
         raise ContractError("EXECUTION_QUALITY_CONFIG")
-    parsed_events = validate_phase_event_sequence(events, plan=plan)
+    parsed_events = validate_phase_event_sequence(events, plan=plan, plans=plans)
     source_digests = {
         "phase_events": canonical_digest(parsed_events),
         "recorder_rows": recorder_rows_digest,
         "pickup_plan": canonical_digest(plan),
     }
+    if plans is not None:
+        if canonical_digest(plan) != plan_digest:
+            raise ContractError("PHASE_EVENT_PLANS_BINDING")
+        source_digests["pickup_plans"] = canonical_digest(plans)
     flags: list[str] = []
     if source_digests["pickup_plan"] != plan_digest:
         flags.append("PLAN_DIGEST_MISMATCH")
-    if any(event["run_id"] != run_id or event["plan_digest"] != plan_digest for event in parsed_events):
+    if any(event["run_id"] != run_id or plans is None and event["plan_digest"] != plan_digest for event in parsed_events):
         flags.append("PHASE_EVENT_BINDING_MISMATCH")
     windows, join_flags, _ = phase_row_windows(
         events=parsed_events,
         recorder_rows=recorder_rows,
         recorder_ros_clock_type=recorder_ros_clock_type,
-        plan=plan,
+        plan=plan, plans=plans,
     )
     flags.extend(join_flags)
+    if plans is not None:
+        windows = [window for window in windows if window["plan_digest"] == plan_digest]
     steps = plan.get("steps") if isinstance(plan, Mapping) else None
     if not isinstance(steps, list):
         raise ContractError("EXECUTION_QUALITY_PLAN")

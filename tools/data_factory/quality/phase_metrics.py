@@ -5,7 +5,7 @@ import math
 from typing import Any, Mapping, Sequence
 
 from tools.fr5_data_factory import ContractError, DIGEST, SAFE_ID, canonical_digest
-from tools.data_factory.quality.phase_events import validate_phase_event_sequence, writer_resource_contract
+from tools.data_factory.quality.phase_events import validate_phase_event_sequence, validate_phase_plans, writer_resource_contract
 
 
 ATTRIBUTE_SCHEMA = "data_factory.quality_attribute.v1"
@@ -37,9 +37,9 @@ def quality_attribute(*, attribute: str, run_id: str, resolved_job_digest: str, 
     return {"schema_version": ATTRIBUTE_SCHEMA, "attribute": attribute, "run_id": run_id, "resolved_job_digest": resolved_job_digest, "plan_digest": plan_digest, "source_digests": dict(source_digests), "status": status, "metrics": dict(metrics), "flags": list(dict.fromkeys(flags))}
 
 
-def phase_intervals(events: Sequence[Mapping[str, Any]], *, plan: Mapping[str, Any] | None = None) -> tuple[list[dict[str, Any]], list[str], str | None]:
+def phase_intervals(events: Sequence[Mapping[str, Any]], *, plan: Mapping[str, Any] | None = None, plans: Mapping[str, Mapping[str, Any]] | None = None) -> tuple[list[dict[str, Any]], list[str], str | None]:
     """Build only unambiguous accepted-to-terminal intervals from control events."""
-    parsed = validate_phase_event_sequence(events, plan=plan)
+    parsed = validate_phase_event_sequence(events, plan=plan, plans=plans)
     flags: list[str] = []
     if not parsed:
         return [], ["PHASE_EVENTS_MISSING"], None
@@ -50,10 +50,11 @@ def phase_intervals(events: Sequence[Mapping[str, Any]], *, plan: Mapping[str, A
     if len(clocks) != 1:
         flags.append("PHASE_EVENT_CLOCK_MISMATCH")
         return [], flags, None
-    pending: dict[tuple[str, int | None], dict[str, Any]] = {}
+    identified = plans is not None or len({(event["run_id"], event["plan_digest"]) for event in parsed}) > 1
+    pending: dict[tuple[str, str, str, int | None], dict[str, Any]] = {}
     intervals: list[dict[str, Any]] = []
     for event in parsed:
-        key = (event["phase"], event["segment_index"])
+        key = (event["run_id"], event["plan_digest"], event["phase"], event["segment_index"])
         if event["event"] == "GOAL_ACCEPTED":
             if key in pending:
                 flags.append("PHASE_INTERVAL_OVERLAP")
@@ -65,7 +66,7 @@ def phase_intervals(events: Sequence[Mapping[str, Any]], *, plan: Mapping[str, A
             elif event["event_ros_time_ns"] < start["event_ros_time_ns"]:
                 flags.append("PHASE_EVENT_TIME_REVERSED")
             else:
-                intervals.append({"phase": event["phase"], "segment_index": event["segment_index"], "segment_count": event["segment_count"], "start_ros_time_ns": start["event_ros_time_ns"], "end_ros_time_ns": event["event_ros_time_ns"], "duration_s": (event["event_ros_time_ns"] - start["event_ros_time_ns"]) / 1_000_000_000, "terminal_action_status": event["action_status"]})
+                intervals.append({**({"run_id": event["run_id"], "plan_digest": event["plan_digest"]} if identified else {}), "phase": event["phase"], "segment_index": event["segment_index"], "segment_count": event["segment_count"], "start_ros_time_ns": start["event_ros_time_ns"], "end_ros_time_ns": event["event_ros_time_ns"], "duration_s": (event["event_ros_time_ns"] - start["event_ros_time_ns"]) / 1_000_000_000, "terminal_action_status": event["action_status"]})
     if pending:
         flags.append("PHASE_TERMINAL_MISSING")
     intervals.sort(key=lambda interval: interval["start_ros_time_ns"])
@@ -74,9 +75,9 @@ def phase_intervals(events: Sequence[Mapping[str, Any]], *, plan: Mapping[str, A
     return intervals, list(dict.fromkeys(flags)), next(iter(clocks))
 
 
-def phase_row_windows(*, events: Sequence[Mapping[str, Any]], recorder_rows: Sequence[Mapping[str, Any]], recorder_ros_clock_type: str, plan: Mapping[str, Any] | None = None) -> tuple[list[dict[str, Any]], list[str], str | None]:
+def phase_row_windows(*, events: Sequence[Mapping[str, Any]], recorder_rows: Sequence[Mapping[str, Any]], recorder_ros_clock_type: str, plan: Mapping[str, Any] | None = None, plans: Mapping[str, Mapping[str, Any]] | None = None) -> tuple[list[dict[str, Any]], list[str], str | None]:
     """Return row indices only; callers keep the dataset payload in its original owner."""
-    intervals, flags, event_clock = phase_intervals(events, plan=plan)
+    intervals, flags, event_clock = phase_intervals(events, plan=plan, plans=plans)
     if event_clock is None or recorder_ros_clock_type != event_clock:
         return [], [*flags, "RECORDER_CLOCK_UNQUALIFIED"], event_clock
     if flags or not intervals:
@@ -94,20 +95,32 @@ def phase_row_windows(*, events: Sequence[Mapping[str, Any]], recorder_rows: Seq
     return windows, [], event_clock
 
 
-def phase_timing_attribute(*, run_id: str, resolved_job_digest: str, plan_digest: str, events: Sequence[Mapping[str, Any]], recorder_rows: Sequence[Mapping[str, Any]] | None = None, recorder_rows_digest: str | None = None, recorder_ros_clock_type: str | None = None, plan: Mapping[str, Any] | None = None) -> dict[str, Any]:
+def phase_timing_attribute(*, run_id: str, resolved_job_digest: str, plan_digest: str, events: Sequence[Mapping[str, Any]], recorder_rows: Sequence[Mapping[str, Any]] | None = None, recorder_rows_digest: str | None = None, recorder_ros_clock_type: str | None = None, plan: Mapping[str, Any] | None = None, plans: Mapping[str, Mapping[str, Any]] | None = None) -> dict[str, Any]:
     """Report phase intervals and, only with an explicit same-clock qualification, row windows."""
-    parsed_events = validate_phase_event_sequence(events, plan=plan)
-    intervals, flags, event_clock = phase_intervals(parsed_events, plan=plan)
+    if plans is not None:
+        validate_phase_plans(plans, plan=plan)
+        if plan_digest not in plans or plan is not None and canonical_digest(plan) != plan_digest:
+            raise ContractError("PHASE_EVENT_PLANS_BINDING")
+    parsed_events = validate_phase_event_sequence(events, plan=plan, plans=plans)
+    intervals, flags, event_clock = phase_intervals(parsed_events, plan=plan, plans=plans)
+    if plans is not None:
+        intervals = [item for item in intervals if item["plan_digest"] == plan_digest]
     source_digests = {"phase_events": canonical_digest(parsed_events)}
     metrics: dict[str, Any] = {"event_count": len(events), "phase_intervals": intervals, "event_ros_clock_type": event_clock, "row_window_status": "NOT_AVAILABLE", "joined_row_count": 0, "writer_resource_contract": writer_resource_contract()}
-    if any(event["run_id"] != run_id or event["plan_digest"] != plan_digest for event in parsed_events):
+    if plans is not None:
+        source_digests["pickup_plans"] = canonical_digest(plans)
+        metrics["source_event_count"] = len(parsed_events)
+        metrics["event_count"] = sum(event["plan_digest"] == plan_digest for event in parsed_events)
+    if any(event["run_id"] != run_id or plans is None and event["plan_digest"] != plan_digest for event in parsed_events):
         flags.append("PHASE_EVENT_BINDING_MISMATCH")
     if recorder_rows is not None:
         if not isinstance(recorder_rows_digest, str) or not DIGEST.fullmatch(recorder_rows_digest):
             raise ContractError("QUALITY_SOURCE_DIGEST")
         source_digests["recorder_rows"] = recorder_rows_digest
-        windows, join_flags, _ = phase_row_windows(events=parsed_events, recorder_rows=recorder_rows, recorder_ros_clock_type=recorder_ros_clock_type or "", plan=plan)
+        windows, join_flags, _ = phase_row_windows(events=parsed_events, recorder_rows=recorder_rows, recorder_ros_clock_type=recorder_ros_clock_type or "", plan=plan, plans=plans)
         flags.extend(join_flags)
+        if plans is not None:
+            windows = [window for window in windows if window["plan_digest"] == plan_digest]
         if windows:
             counts = { (window["phase"], window["segment_index"]): len(window["row_indices"]) for window in windows }
             for interval in intervals:

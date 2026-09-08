@@ -25,6 +25,7 @@ def interaction_quality_attribute(
     resolved_job_digest: str,
     plan_digest: str,
     plan: Mapping[str, Any],
+    plans: Mapping[str, Mapping[str, Any]] | None = None,
     events: Sequence[Mapping[str, Any]],
     recorder_rows: Sequence[Mapping[str, Any]],
     recorder_rows_digest: str,
@@ -34,26 +35,37 @@ def interaction_quality_attribute(
     """Report qualified contact-window and lift continuity evidence, never camera semantics."""
     if not DIGEST.fullmatch(recorder_rows_digest) or not isinstance(execution_evidence, Mapping):
         raise ContractError("INTERACTION_QUALITY_CONFIG")
-    parsed_events = validate_phase_event_sequence(events, plan=plan)
+    parsed_events = validate_phase_event_sequence(events, plan=plan, plans=plans)
     source_digests = {
         "phase_events": canonical_digest(parsed_events),
         "recorder_rows": recorder_rows_digest,
         "pickup_plan": canonical_digest(plan),
         "execution_evidence": canonical_digest(execution_evidence),
     }
+    if plans is not None:
+        if canonical_digest(plan) != plan_digest:
+            raise ContractError("PHASE_EVENT_PLANS_BINDING")
+        source_digests["pickup_plans"] = canonical_digest(plans)
     flags: list[str] = []
     if source_digests["pickup_plan"] != plan_digest:
         flags.append("PLAN_DIGEST_MISMATCH")
-    if any(event["run_id"] != run_id or event["plan_digest"] != plan_digest for event in parsed_events):
+    if any(event["run_id"] != run_id or plans is None and event["plan_digest"] != plan_digest for event in parsed_events):
         flags.append("PHASE_EVENT_BINDING_MISMATCH")
     windows, join_flags, _ = phase_row_windows(
         events=parsed_events,
         recorder_rows=recorder_rows,
         recorder_ros_clock_type=recorder_ros_clock_type,
-        plan=plan,
+        plan=plan, plans=plans,
     )
     flags.extend(join_flags)
+    if plans is not None:
+        windows = [window for window in windows if window["plan_digest"] == plan_digest]
     learned = "learned_proposal" in plan
+    if plans is not None:
+        trace = execution_evidence.get("learned_execution")
+        evidence_plan = (trace.get("plan_digest") if isinstance(trace, Mapping) else None) if learned else execution_evidence.get("plan_digest")
+        if evidence_plan != plan_digest:
+            raise ContractError("INTERACTION_QUALITY_BINDING")
     if learned:
         flags.append("LEARNED_INTERACTION_UNQUALIFIED")
     by_phase = {window["phase"]: window for window in windows}

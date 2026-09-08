@@ -190,6 +190,34 @@ available timing or joint metrics SHALL NOT imply task success or dataset admiss
 - **THEN** the canonical consumer rejects instead of reporting overwritten row
   counts as AVAILABLE
 
+### Requirement: Shared chunk diagnostics retain each exact plan identity
+
+Existing quality consumers SHALL accept an explicit digest-to-plan lookup when
+reading one task's shared phase stream. Every referenced plan SHALL match its
+canonical digest and run; each event SHALL retain its original global sequence,
+plan and segment evidence binding. Repeated phase names in different plans SHALL
+remain distinct, while duplicate identities within one plan SHALL be rejected.
+Missing terminals, sequence gaps, clock mismatch and overlapping row windows
+SHALL remain visible across the full stream before selecting a plan's metrics.
+
+Each existing quality attribute and episode report SHALL retain one exact
+`plan_digest`; the lookup digest is source provenance, not an aggregate plan.
+Timing and joint metrics SHALL select that plan's rows and targets, and interaction
+evidence SHALL bind that same plan. Legacy single-plan callers SHALL retain their
+existing representation. Learned interaction remains unqualified. This read-side
+contract SHALL NOT authorize a subsequent chunk or establish complete-task success;
+canonical multi-chunk execution history and its live caller remain separate work.
+
+#### Scenario: Two chunks repeat three held subsegments
+
+- **WHEN** two exact plans in the same run each emit segments 0, 1 and 2 into
+  one globally sequenced stream with twelve distinct recorder rows
+- **THEN** each plan's existing report retains its own six rows, targets and digest
+- **AND** the full stream and plan lookup remain attributable source evidence
+- **AND** another plan's terminal cannot complete a missing terminal in the first
+- **AND** a missing, altered or cross-run plan, malformed binding or duplicate
+  same-plan event is rejected before producing joined quality evidence
+
 ### Requirement: Offline solver evidence must separate numerical and deployed usefulness
 
 Rollout's offline native comparison SHALL reuse canonical checkpoint admission

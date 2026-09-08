@@ -107,14 +107,40 @@ def validate_phase_event(value: Mapping[str, Any], *, plan: Mapping[str, Any] | 
     return record
 
 
-def validate_phase_event_sequence(events, *, plan=None):
+def validate_phase_plans(plans, *, plan=None):
+    """Validate an explicit immutable lookup for one task's exact chunk plans."""
+    if not isinstance(plans, Mapping) or not plans:
+        raise ContractError("PHASE_EVENT_PLANS_BINDING")
+    run_ids = set()
+    for digest, value in plans.items():
+        if (not isinstance(digest, str) or not DIGEST.fullmatch(digest)
+                or not isinstance(value, Mapping) or canonical_digest(value) != digest
+                or not isinstance(value.get("run_id"), str) or not SAFE_ID.fullmatch(value["run_id"])):
+            raise ContractError("PHASE_EVENT_PLANS_BINDING")
+        run_ids.add(value["run_id"])
+    if len(run_ids) != 1 or plan is not None and plans.get(canonical_digest(plan)) != plan:
+        raise ContractError("PHASE_EVENT_PLANS_BINDING")
+    return plans
+
+
+def validate_phase_event_sequence(events, *, plan=None, plans=None):
     """Validate segment identities once, before existing timing/row consumers."""
-    records = [validate_phase_event(event, plan=plan) for event in events]
+    if plans is not None:
+        plans = validate_phase_plans(plans, plan=plan)
+    records = []
+    for event in events:
+        selected = plan
+        if plans is not None:
+            digest = event.get("plan_digest") if isinstance(event, Mapping) else None
+            selected = plans.get(digest) if isinstance(digest, str) else None
+            if selected is None:
+                raise ContractError("PHASE_EVENT_PLAN_BINDING")
+        records.append(validate_phase_event(event, plan=selected))
     counts, seen, last_index = {}, set(), {}
     for event in records:
         if event["event"] not in ACTION_EVENTS:
             continue
-        phase, count = event["phase"], event["segment_count"]
+        phase, count = (event["run_id"], event["plan_digest"], event["phase"]), event["segment_count"]
         if phase in counts and counts[phase] != count:
             raise ContractError("PHASE_EVENT_SEGMENT_COUNT")
         counts[phase] = count
@@ -129,7 +155,7 @@ def validate_phase_event_sequence(events, *, plan=None):
     return records
 
 
-def read_phase_events(path: str | Path, *, plan: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
+def read_phase_events(path: str | Path, *, plan: Mapping[str, Any] | None = None, plans: Mapping[str, Mapping[str, Any]] | None = None) -> list[dict[str, Any]]:
     """Read JSONL strictly; malformed sidecars are not silently repaired."""
     try:
         lines = Path(path).read_text(encoding="utf-8").splitlines()
@@ -140,10 +166,13 @@ def read_phase_events(path: str | Path, *, plan: Mapping[str, Any] | None = None
         if not line.strip():
             raise ContractError("PHASE_EVENT_JSONL", f"blank line {number}")
         try:
-            records.append(validate_phase_event(load_json_strict(line), plan=plan))
+            value = load_json_strict(line)
+            if plans is None:
+                value = validate_phase_event(value, plan=plan)
+            records.append(value)
         except ContractError as exc:
             raise ContractError(exc.code, f"line {number}: {exc}") from exc
-    return validate_phase_event_sequence(records, plan=plan)
+    return validate_phase_event_sequence(records, plan=plan, plans=plans)
 
 
 class PhaseEventWriter:
