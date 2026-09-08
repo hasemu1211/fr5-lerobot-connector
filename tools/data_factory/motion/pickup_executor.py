@@ -907,6 +907,10 @@ class PickupExecutor:
 
     def _chunk_boundary(self, run, lease_id):
         self.tick()
+        self._check_chunk_boundary(run, lease_id)
+
+    def _check_chunk_boundary(self, run, lease_id):
+        # Pure checks are safe while the Scene lock is held; tick/fault is not.
         if run["state"] != "LEARNED_CHUNK_COMPLETE" or "learned_proposal" not in run["plan"]:
             raise ContractError(run.get("failure_code", "LEARNED_CHUNK_STATE"))
         if lease_id != run["execution"]["lease_id"]:
@@ -915,6 +919,11 @@ class PickupExecutor:
             raise ContractError("ROS_EXEC_ACTIVE")
         if run["cancel_event"].is_set():
             raise ContractError("LEARNED_CANCELLED")
+        now = self.monotonic_clock()
+        if now >= run["execution"]["lease_deadline"]:
+            raise ContractError("HEARTBEAT_TIMEOUT")
+        if now > run["execution"]["wait_deadline"]:
+            raise ContractError("LEARNED_CHUNK_TIMEOUT")
 
     def _prepare_next(self, payload):
         run = self._execution_payload(payload, {"run_id", "plan_digest", "lease_id", "motion_program"}, "LEARNED_NEXT_SCHEMA")
@@ -1003,35 +1012,41 @@ class PickupExecutor:
             raise ContractError("LEARNED_NEXT_CELL_BINDING")
         if self.scene_state_store is None:
             raise ContractError("SCENE_STATE_REQUIRED")
-        with self.scene_state_store.locked_snapshot(execution["scene_state_digest"]) as snapshot:
-            if (snapshot["scene_state_digest"] != execution["scene_state_digest"]
-                    or snapshot["scene_state"]["revision"] != execution["scene_revision"]
-                    or snapshot["scene_state"]["objects"].get(plan["scene_binding"]["object_instance_id"]) != execution["scene_object"]):
-                raise ContractError("SCENE_STATE_CHANGED")
-            self._chunk_boundary(run, payload["lease_id"])
-            # Freeze all prior provenance, including its approval, into the
-            # next exact plan's predecessor digest. Never nest earlier history.
-            history = [*run.get("learned_history", []), candidate["previous_chunk"]]
-            candidate = {key: value for key, value in candidate.items() if key != "previous_chunk"}
-            try:
-                self.cell_state_store.mark_blocked("EXECUTION_IN_PROGRESS", payload["run_id"], candidate["digest"],
-                                                   expected_state_digest=canonical_digest(cell))
-            except ContractError:
-                raise
-            except Exception as exc:
-                raise ContractError("CELL_STATE_ARMING_FAILED") from exc
-            self._chunk_boundary(run, payload["lease_id"])
-            next_execution = {key: copy.deepcopy(execution[key]) for key in
-                              ("lease_id", "lease_deadline", "scene_object", "scene_state_digest", "scene_revision", "phase_event_sequence")}
-            for key in ("phase_events_path", "behavior_report_status"):
-                if key in execution:
-                    next_execution[key] = execution[key]
-            next_execution.update(step_index=0, grasp_verdict=None, semantic_verdict=None, release_verdict=None,
-                                  snapshot=None, active=False, terminal_phases=[])
-            cancel = run["cancel_event"]
-            run.clear()
-            run.update(candidate, execution=next_execution, cancel_event=cancel, learned_history=history, state="EXECUTING")
-            self._start_current_step(run)
+        try:
+            with self.scene_state_store.locked_snapshot(execution["scene_state_digest"]) as snapshot:
+                if (snapshot["scene_state_digest"] != execution["scene_state_digest"]
+                        or snapshot["scene_state"]["revision"] != execution["scene_revision"]
+                        or snapshot["scene_state"]["objects"].get(plan["scene_binding"]["object_instance_id"]) != execution["scene_object"]):
+                    raise ContractError("SCENE_STATE_CHANGED")
+                self._check_chunk_boundary(run, payload["lease_id"])
+                # Freeze all prior provenance, including its approval, into the
+                # next exact plan's predecessor digest. Never nest earlier history.
+                history = [*run.get("learned_history", []), candidate["previous_chunk"]]
+                candidate = {key: value for key, value in candidate.items() if key != "previous_chunk"}
+                try:
+                    self.cell_state_store.mark_blocked("EXECUTION_IN_PROGRESS", payload["run_id"], candidate["digest"],
+                                                       expected_state_digest=canonical_digest(cell))
+                except ContractError:
+                    raise
+                except Exception as exc:
+                    raise ContractError("CELL_STATE_ARMING_FAILED") from exc
+                self._check_chunk_boundary(run, payload["lease_id"])
+                next_execution = {key: copy.deepcopy(execution[key]) for key in
+                                  ("lease_id", "lease_deadline", "scene_object", "scene_state_digest", "scene_revision", "phase_event_sequence")}
+                for key in ("phase_events_path", "behavior_report_status"):
+                    if key in execution:
+                        next_execution[key] = execution[key]
+                next_execution.update(step_index=0, grasp_verdict=None, semantic_verdict=None, release_verdict=None,
+                                      snapshot=None, active=False, terminal_phases=[])
+                cancel = run["cancel_event"]
+                run.clear()
+                run.update(candidate, execution=next_execution, cancel_event=cancel, learned_history=history, state="EXECUTING")
+        except ContractError:
+            # Fault handling may write Scene state. The lock must be released
+            # before the sole lease/stop owner processes an expired deadline.
+            self.tick()
+            raise
+        self._start_current_step(run)
         return self._execution_response(run, payload["run_id"], run["digest"], "EXECUTING")
 
     def _approve(self, payload):

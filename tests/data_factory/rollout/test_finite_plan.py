@@ -1733,6 +1733,90 @@ class FinitePlanTest(unittest.TestCase):
             self.assertNotIn(("recorder", "freeze"), calls)
             self.assertNotIn(("recorder", "commit"), calls)
 
+    def test_next_chunk_deadline_expiry_releases_actual_scene_lock(self):
+        import faulthandler
+        import os
+        import subprocess
+        import sys
+        from tools.data_factory.cell_state import CellStateStore
+        from tools.data_factory.scene_state import SceneStateStore
+
+        case = os.environ.get("FR5_SCENE_LOCK_REPLAY_CASE")
+        if case is None:
+            for point in ("scene", "cell"):
+                for deadline in ("lease", "wait"):
+                    with self.subTest(point=point, deadline=deadline):
+                        env = dict(os.environ, FR5_SCENE_LOCK_REPLAY_CASE=f"{point}:{deadline}")
+                        try:
+                            test_id = f"tests.data_factory.rollout.test_finite_plan.{type(self).__name__}.{self._testMethodName}"
+                            result = subprocess.run([sys.executable, "-m", "unittest", test_id],
+                                env=env, capture_output=True, text=True, timeout=5)
+                        except subprocess.TimeoutExpired as exc:
+                            self.fail(f"Scene lock deadlock: {point}/{deadline}\n{exc.stderr}")
+                        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return
+
+        point, deadline = case.split(":")
+        with tempfile.TemporaryDirectory() as directory:
+            scene = SceneStateStore(directory, "fr5-lab-a")
+            scene.update_object(instance_id="cube-1", object_profile_id="cube", state="ON_SURFACE",
+                source="HUMAN", updated_by="synthetic-operator",
+                pose={"place_id": "PLACE_A", "yaw_deg": 0., "x_mm": 10., "y_mm": 20.})
+            job, executor, transport, _, _, now, calls = self.make_job(scene_store=scene)
+            self.assertTrue(job.approve(APPROVAL)["ok"])
+            self.assertTrue(job.start()["ok"])
+            self.assertEqual(job.poll()["state"], "PRECONTACT_HUMAN")
+            self.assertTrue(job.confirm("operator")["ok"])
+            self.assertEqual(job.poll()["state"], "LEARNED_CHUNK_COMPLETE")
+            self.assertTrue(job.prepare_next_learned(self.next_raw_program(job))["ok"])
+            self.assertTrue(job.approve_next_learned({**APPROVAL, "approval_id": "next"})["ok"])
+            original_digest = job.plan_digest
+            cell = CellStateStore(directory, "fr5-lab-a")
+            cell.mark_blocked("EXECUTION_IN_PROGRESS", "run", original_digest)
+            executor.cell_state_store = cell
+            if deadline == "wait":
+                executor.runs["run"]["execution"]["wait_deadline"] = now[0] + .1
+            delay = 100. if deadline == "lease" else .5
+            if point == "scene":
+                locked_snapshot = scene.locked_snapshot
+                @contextmanager
+                def delayed_snapshot(digest):
+                    with locked_snapshot(digest) as snapshot:
+                        now[0] += delay
+                        yield snapshot
+                scene.locked_snapshot = delayed_snapshot
+            else:
+                mark_blocked = cell.mark_blocked
+                def delayed_mark(*args, **kwargs):
+                    result = mark_blocked(*args, **kwargs)
+                    now[0] += delay
+                    return result
+                cell.mark_blocked = delayed_mark
+            process = executor.process
+            def checked_process(request):
+                result = process(request)
+                if request["op"] == "execute_next":
+                    # Native expiry handling must finish before returning,
+                    # without relying on OneJob's subsequent abort/poll.
+                    self.assertEqual(executor.runs["run"]["state"], "BLOCKED")
+                    self.assertEqual(scene.snapshot()["scene_state"]["objects"]["cube-1"]["state"], "UNKNOWN")
+                return result
+            executor.process = checked_process
+            faulthandler.dump_traceback_later(1)
+            try:
+                result = job.start_next_learned()
+            finally:
+                faulthandler.cancel_dump_traceback_later()
+            self.assertFalse(result["ok"], result)
+            self.assertEqual(result["code"], "HEARTBEAT_TIMEOUT" if deadline == "lease" else "LEARNED_CHUNK_TIMEOUT")
+            self.assertEqual(executor.runs["run"]["digest"], original_digest)
+            self.assertEqual(executor.runs["run"]["state"], "BLOCKED")
+            self.assertEqual(len(transport.sent), 1)
+            self.assertFalse(transport.owns_active_goal)
+            self.assertNotIn(("recorder", "commit"), calls)
+            self.assertFalse(cell.read()["cell_ready"])
+            self.assertEqual(scene.snapshot()["scene_state"]["objects"]["cube-1"]["state"], "UNKNOWN")
+
     def test_next_chunk_rejects_late_compile_changed_cell_and_superseded_hardware(self):
         for failure in ("late", "paused_source", "reentrant", "cell", "superseded", "wrong_incarnation", "paused_controller", "cell_race", "cancel"):
             with self.subTest(failure=failure):
