@@ -87,6 +87,108 @@ class RecorderTransactionTest(unittest.TestCase):
         "transaction_id", "episode_index", "metrics", "artifacts", "detail",
     }
 
+    def retention_fixture(self, directory):
+        from lerobot.datasets.lerobot_dataset import LeRobotDataset
+        import numpy as np
+        recorder = self.make_recorder(directory)
+        shutil.rmtree(recorder.args.root)
+        features = {
+            "observation.state": {"dtype": "float32", "shape": (2,), "names": ["a", "b"]},
+            "action": {"dtype": "float32", "shape": (2,), "names": ["a", "b"]},
+            **{f"observation.images.{camera}": {"dtype": "image", "shape": (8, 8, 3),
+                "names": ["height", "width", "channels"]} for camera in recorder.camera_names},
+        }
+        recorder.dataset = LeRobotDataset.create(
+            repo_id="tests/retention", root=recorder.args.root, fps=30,
+            features=features, use_videos=False, image_writer_threads=0,
+        )
+        recorder.begin_episode(self.transaction(directory))
+        for index in range(2):
+            recorder.dataset.add_frame({
+                "task": "mechanical release diagnostic",
+                "observation.state": np.array([index, 1], dtype=np.float32),
+                "action": np.array([index, 2], dtype=np.float32),
+                **{f"observation.images.{camera}": np.full((8, 8, 3), 40 + index, dtype=np.uint8)
+                   for camera in recorder.camera_names},
+            })
+            recorder.source_provenance.append({"phase": "MECHANICAL_RELEASE", "target_ros_s": index / 30})
+        recorder.frames = 2
+        recorder.freeze_episode()
+        return recorder
+
+    def retain_control(self, recorder, disposition="semantic_failure", op_id="retain-1", **extra):
+        return process_recorder_control_line(recorder, json.dumps({
+            "schema_version": "data_factory.recorder_command.v1", "op_id": op_id,
+            "op": "retain", "transaction_id": recorder._transaction["transaction_id"],
+            "disposition": disposition, **extra,
+        }), {})
+
+    def test_native_retention_control_success_retry_eof_and_abort(self):
+        for disposition in ("semantic_failure", "timeout", "cancel", "infeasible_reset",
+                            "technical_rejection", "uncertain"):
+            with self.subTest(disposition=disposition), tempfile.TemporaryDirectory() as directory:
+                recorder = self.retention_fixture(directory)
+                before = dataset_snapshot(recorder.args.root)
+                result = self.retain_control(recorder, disposition)
+                self.assertTrue(result["ok"], result)
+                receipt = result["retention"]
+                self.assertTrue(receipt["durable"])
+                self.assertFalse(receipt["training_eligible"])
+                self.assertFalse(receipt["partial"])
+                destination = Path(receipt["destination"])
+                self.assertEqual(json.loads((destination / "meta/info.json").read_text())["total_frames"], 2)
+                self.assertEqual(json.loads((destination / "provenance.json").read_text())["rows"][0]["provenance"]["phase"], "MECHANICAL_RELEASE")
+                import pyarrow.parquet as pq
+                table = pq.read_table(next((destination / "data").rglob("*.parquet"))).to_pydict()
+                self.assertEqual(table["observation.state"], [[0.0, 1.0], [1.0, 1.0]])
+                self.assertEqual(table["action"], [[0.0, 2.0], [1.0, 2.0]])
+                self.assertEqual(len(table["observation.images.up"]), 2)
+                persisted = {str(p): p.read_bytes() for p in destination.rglob("*") if p.is_file()}
+                self.assertEqual(self.retain_control(recorder, disposition, "retry")["retention"], receipt)
+                self.assertFalse(recorder.abort_episode()["ok"])
+                run_recorder_control_jsonl(recorder, io.StringIO(""), io.StringIO(), lambda: None)
+                self.assertEqual(persisted, {str(p): p.read_bytes() for p in destination.rglob("*") if p.is_file()})
+                self.assertEqual(dataset_snapshot(recorder.args.root), before)
+                recorder._release_transaction_lock()
+
+    def test_native_retention_partial_corrupt_and_uncertain_save(self):
+        from lerobot.datasets.lerobot_dataset import LeRobotDataset
+        for failure in ("corrupt", "save"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                recorder = self.retention_fixture(directory)
+                if failure == "corrupt":
+                    Path(recorder.dataset.writer.episode_buffer["observation.images.up"][0]).write_bytes(b"corrupt")
+                    result = self.retain_control(recorder)
+                    self.assertTrue(result["ok"], result)
+                    self.assertTrue(result["retention"]["partial"])
+                    self.assertEqual(result["retention"]["rows"], 1)
+                else:
+                    original = LeRobotDataset.save_episode
+                    def save_then_fail(dataset, *args, **kwargs):
+                        original(dataset, *args, **kwargs)
+                        raise OSError("after native save")
+                    with mock.patch.object(LeRobotDataset, "save_episode", save_then_fail):
+                        result = self.retain_control(recorder)
+                    self.assertFalse(result["ok"])
+                    self.assertTrue(result["retention"]["save_uncertain"])
+                    destination = Path(result["retention"]["destination"])
+                    self.assertTrue(list(destination.rglob("*.parquet")))
+                    self.assertEqual(self.retain_control(recorder, op_id="retry")["retention"], result["retention"])
+                    self.assertFalse(recorder.abort_episode()["ok"])
+                    run_recorder_control_jsonl(recorder, io.StringIO(""), io.StringIO(), lambda: None)
+                    self.assertTrue(list(destination.rglob("*.parquet")))
+                recorder._release_transaction_lock()
+
+    def test_retention_invalid_binding_and_destination_have_no_effects(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.retention_fixture(directory)
+            self.assertEqual(self.retain_control(recorder, transaction_id="wrong")["reason_code"], "RETENTION_TRANSACTION_MISMATCH")
+            destination = Path(recorder._transaction["result_path"]).parent / "diagnostic_episode"
+            destination.symlink_to(recorder.args.root, target_is_directory=True)
+            self.assertEqual(self.retain_control(recorder)["reason_code"], "RETENTION_DESTINATION_CONFLICT")
+            self.assertEqual(recorder.episode_state, recorder.FROZEN)
+            recorder._release_transaction_lock()
+
     def test_append_only_snapshot_accepts_one_episode_and_rejects_old_mutation(self):
         before = {
             "total_episodes": 7,

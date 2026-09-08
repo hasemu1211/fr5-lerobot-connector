@@ -1161,6 +1161,121 @@ class FR5LeRobotRecorder(Node):
             self.dataset.clear_episode_buffer()
             self._buffer_cleared = True
 
+    def retain_episode(self, transaction_id: str, disposition: str) -> dict:
+        """Publish diagnostic evidence only; source staging remains quarantined.
+
+        This is deliberately terminal, including failed saves. A retry can inspect
+        the receipt but cannot clear, overwrite, or republish an uncertain save.
+        Motion stopping and the decision to invoke retention belong to OneJob.
+        """
+        transaction = self._transaction
+        dispositions = {"semantic_failure", "timeout", "cancel", "infeasible_reset",
+                        "technical_rejection", "uncertain"}
+        if not transaction or transaction_id != transaction["transaction_id"]:
+            return self._result(False, "RETENTION_TRANSACTION_MISMATCH")
+        if not isinstance(disposition, str) or disposition not in dispositions:
+            return self._result(False, "RETENTION_DISPOSITION_INVALID")
+        previous = getattr(self, "_retention_result", None)
+        if previous is not None:
+            return previous if previous["retention"]["disposition"] == disposition else self._result(
+                False, "RETENTION_CONFLICT")
+        run_dir = Path(transaction["result_path"]).parent
+        destination = run_dir / "diagnostic_episode"
+        # Validate every ancestor before freezing, journalling, or creating files.
+        if (any(path.is_symlink() for path in (destination, *destination.parents))
+                or run_dir.resolve() != Path(self.args.run_root).resolve() / transaction["run_id"]
+                or self.args.root.resolve() in destination.resolve().parents
+                or destination.exists()):
+            return self._result(False, "RETENTION_DESTINATION_CONFLICT")
+        if self.episode_state == self.RECORDING:
+            self.freeze_episode()
+        with self.lock:
+            if self.episode_state not in (self.FROZEN, self.QUARANTINED_COMMIT):
+                return self._result(False, "STATE_RETENTION_NOT_ALLOWED")
+            if self.recording or self.writer_queue.unfinished_tasks:
+                return self._result(False, "RETENTION_WRITER_NOT_SETTLED")
+            if getattr(self, "_retention_in_progress", False):
+                return self._result(False, "RETENTION_IN_PROGRESS")
+            self._retention_in_progress = True
+            self.episode_state = self.QUARANTINED_COMMIT
+        receipt = {
+            "schema_version": "data_factory.diagnostic_retention.v1",
+            "transaction_id": transaction_id,
+            "staging_manifest_digest": transaction["staging_manifest_digest"],
+            "disposition": disposition, "destination": str(destination),
+            "training_eligible": False, "quality_accepted": False,
+            "durable": False, "partial": True, "quarantined": True,
+            "save_uncertain": False, "rows": 0, "available_rows": self.frames,
+        }
+        # Install the latch before effects: even a persistence exception is terminal.
+        self._retention_result = self._result(False, "RETENTION_SAVE_UNCERTAIN", retention=receipt)
+        try:
+            self._write_commit_guard(self.QUARANTINED_COMMIT, "RETENTION_STARTED")
+            self._drain_image_writer()
+            from lerobot.datasets.lerobot_dataset import LeRobotDataset
+            from PIL import Image as PILImage
+            buffer = self.dataset.writer.episode_buffer or {"size": 0}
+            features = {key: dict(spec) for key, spec in self.dataset.features.items()
+                        if key not in {"timestamp", "frame_index", "episode_index", "index", "task_index"}}
+            # Native image storage avoids a second encoder/recording lifecycle.
+            features = {key: {**spec, "dtype": "image"} if spec["dtype"] == "video" else spec
+                        for key, spec in features.items()}
+            diagnostic = LeRobotDataset.create(
+                repo_id="diagnostics/rollout", root=destination, fps=self.args.fps,
+                features=features, robot_type="fr5_ros2", use_videos=False,
+                image_writer_threads=0,
+            )
+            corrupt = []
+            provenance = []
+            for index in range(min(self.frames, buffer["size"])):
+                try:
+                    frame = {"task": buffer["task"][index]}
+                    for key, spec in features.items():
+                        value = buffer[key][index]
+                        if spec["dtype"] == "image":
+                            path = Path(value)
+                            if any(parent.is_symlink() for parent in (path, *path.parents)) or not any(
+                                path.resolve().is_relative_to(Path(staging).resolve())
+                                for staging in transaction["staging_dirs"]
+                            ):
+                                raise ValueError("image is outside transaction staging")
+                            with PILImage.open(path) as image:
+                                value = np.array(image.convert("RGB"))
+                        frame[key] = value
+                    source = self.source_provenance[index]
+                except Exception as exc:
+                    corrupt.append({"source_row": index, "detail": str(exc)})
+                    continue
+                diagnostic.add_frame(frame)
+                provenance.append({"source_row": index, "provenance": source})
+            receipt["rows"] = len(provenance)
+            receipt["corrupt_rows"] = corrupt
+            receipt["partial"] = len(provenance) != self.frames or not self.frames
+            receipt["save_uncertain"] = True
+            if provenance:
+                diagnostic.save_episode(parallel_encoding=False)
+            diagnostic.finalize()
+            self._write_json_atomic(destination / "provenance.json", {"rows": provenance})
+            # fsync native writer output before issuing a durable receipt.
+            for path in sorted(destination.rglob("*"), reverse=True):
+                fd = os.open(path, os.O_RDONLY)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+            receipt["durable"] = True
+            receipt["save_uncertain"] = False
+            self._write_json_atomic(destination / "retention.json", receipt)
+            self._write_run_result(self.QUARANTINED_COMMIT, "DIAGNOSTIC_RETAINED")
+            self._append_event("DIAGNOSTIC_RETAINED")
+            self._retention_result = self._result(True, "DIAGNOSTIC_RETAINED", retention=receipt)
+        except Exception as exc:
+            receipt["durable"] = False
+            receipt["save_uncertain"] = True
+            result = self._persist_quarantine("RETENTION_SAVE_UNCERTAIN", str(exc))
+            self._retention_result = {**result, "retention": receipt}
+        return self._retention_result
+
     def abort_episode(self) -> dict:
         if self.episode_state == self.RECORDING:
             self.freeze_episode()
@@ -1664,7 +1779,7 @@ class FR5LeRobotRecorder(Node):
 
 _CONTROL_SCHEMA = "data_factory.recorder_command.v1"
 _CONTROL_RESPONSE_SCHEMA = "data_factory.recorder_response.v1"
-_CONTROL_OPS = {"begin", "trim_readiness_prefix", "freeze", "commit", "abort", "status"}
+_CONTROL_OPS = {"begin", "trim_readiness_prefix", "freeze", "commit", "abort", "status", "retain"}
 
 
 def _control_response(node: FR5LeRobotRecorder, op_id, op, result: dict) -> dict:
@@ -1700,6 +1815,8 @@ def _validated_control_request(value: object) -> dict:
     expected = {"schema_version", "op_id", "op", "transaction"} if op == "begin" else {
         "schema_version", "op_id", "op"
     }
+    if op == "retain":
+        expected |= {"transaction_id", "disposition"}
     if set(value) != expected:
         raise RecoveryError("CONTROL_FIELDS", f"{op} requires exact fields {sorted(expected)}")
     if op == "begin" and not isinstance(value["transaction"], dict):
@@ -1734,6 +1851,8 @@ def process_recorder_control_line(
             result = node.freeze_episode()
         elif op == "commit":
             result = node.commit_episode()
+        elif op == "retain":
+            result = node.retain_episode(request["transaction_id"], request["disposition"])
         elif op == "abort":
             result = node.abort_episode()
         else:
