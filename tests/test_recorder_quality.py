@@ -423,6 +423,8 @@ class RecorderContractTest(unittest.TestCase):
         self.assertIn("/dev/v4l/by-id", camera_launcher)
         self.assertIn("git submodule update --init --recursive", setup)
         self.assertNotIn("rm -rf src/frcobot_ros2", setup)
+        self.assertIn("colcon build --base-paths src --symlink-install", setup)
+        self.assertIn("--cmake-args -DPython3_EXECUTABLE=/usr/bin/python3", setup)
         self.assertIn("epoch_time.tv_sec * 1000000 + epoch_time.tv_usec;", usb_cam_timestamp)
 
     def test_vendor_patch_applies_to_the_pinned_submodule(self):

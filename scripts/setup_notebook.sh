@@ -37,7 +37,10 @@ set -u
 if [[ ! -e /etc/ros/rosdep/sources.list.d/20-default.list ]]; then sudo rosdep init; fi
 rosdep update
 rosdep install --from-paths src --ignore-src -r -y --rosdistro "$ROS_DISTRO"
-colcon build --symlink-install
+# ROS packages live in src; tools may contain unrelated Python setup modules.
+# Use the interpreter matching the apt-installed ROS/ament dependencies.
+colcon build --base-paths src --symlink-install \
+  --cmake-args -DPython3_EXECUTABLE=/usr/bin/python3
 
 mkdir -p datasets/fr5_episodes
 [[ -f config/fr5.env ]] || cp config/fr5.env.example config/fr5.env
