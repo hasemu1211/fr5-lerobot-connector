@@ -46,9 +46,12 @@ class CurrentBracketTest(unittest.TestCase):
         cls.binary = root / "native"
         subprocess.run(["g++", "-std=c++17", "-pthread", str(root / "native.cpp"), "-o", str(cls.binary)], check=True, capture_output=True)
 
-    def packet(self, mode="fresh"):
+    def packet(self, mode="fresh", *, command_budget_ms=None, query_delay_ms=0):
         policy = temporal_policy()
-        result = subprocess.run([str(self.binary), mode, ",".join(map(repr, native_temporal_parameter(policy)))],
+        argv = [str(self.binary), mode, ",".join(map(repr, native_temporal_parameter(policy)))]
+        if command_budget_ms is not None or query_delay_ms:
+            argv.extend((str(command_budget_ms or 0), str(query_delay_ms)))
+        result = subprocess.run(argv,
                                 capture_output=True, text=True, timeout=3)
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout), policy
@@ -58,9 +61,22 @@ class CurrentBracketTest(unittest.TestCase):
         from rclpy.serialization import serialize_message, deserialize_message
         message = DynamicJointState(joint_names=[RESOURCE], interface_values=[InterfaceValue(
             interface_names=packet["names"], values=packet["wire"])])
-        decoded = decode_dynamic_state(deserialize_message(serialize_message(message), DynamicJointState), binding, time.monotonic())
-        return {"captured_at_s": time.time(), "captured_monotonic_s": time.monotonic(),
+        # Replay at the actual native certificate's observation time. The source
+        # has stopped: Python import/serialization delay is not a live sample age.
+        at, mono = packet["wire"][40:42] if len(packet["wire"]) >= 42 else packet["wire"][9:11]
+        decoded = decode_dynamic_state(deserialize_message(serialize_message(message), DynamicJointState), binding, mono)
+        return {"captured_at_s": at, "captured_monotonic_s": mono,
                 "snapshot": {"gripper_controller": {"hardware_execution": decoded}}}
+
+    def test_delayed_wire_replay_does_not_relabel_stale_data_as_live(self):
+        packet, policy = self.packet()
+        time.sleep(.1)  # Reproduce Python being scheduled after the 80 ms live bound.
+        evidence = self.evidence(packet, policy)
+        at, mono = evidence["captured_at_s"], evidence["captured_monotonic_s"]
+        self.assertEqual((at, mono), tuple(packet["wire"][40:42]))
+        check_hardware(evidence, at, mono, .08)
+        with self.assertRaisesRegex(ContractError, "LEARNED_HARDWARE_STALE"):
+            check_hardware(evidence, at+.1, mono+.1, .08)
 
     def test_completed_proof_survives_new_current_brackets_and_old_expiry(self):
         packet, binding = self.packet()
@@ -84,10 +100,19 @@ class CurrentBracketTest(unittest.TestCase):
             with self.subTest(mode=mode):
                 packet, _ = self.packet(mode)
                 success = mode in ("command_99", "command_busy_done", "command_settled")
-                self.assertEqual(packet["completed"], int(success))
+                self.assertEqual(packet["completed"], int(success), packet)
                 self.assertEqual(packet["moves"], 0 if mode=="command_policy_change" else 1)
                 if success:
                     self.assertEqual(packet["error"], 0)
+
+    def test_settled_completion_budget_is_separate_from_sample_freshness(self):
+        # Three causal observations plus two 50 ms polls need more than the old
+        # 120 ms fixture budget when each clock query takes only 5 ms.
+        for budget, completed, error in ((120, 0, -1), (None, 1, 0)):
+            with self.subTest(command_budget_ms=budget):
+                packet, policy = self.packet("command_settled", command_budget_ms=budget, query_delay_ms=5)
+                self.assertEqual(packet, {"moves": 1, "completed": completed, "error": error})
+                self.assertEqual(policy["max_age_s"], .08)
 
     def test_python_causal_terminal_proof_and_archive_separation(self):
         from tools.data_factory.rollout.gripper_evidence import calendar_s

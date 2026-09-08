@@ -1,7 +1,7 @@
 // Appended to the same fixture declarations; all production methods are extracted.
 int main(int argc, char **argv) {
   using namespace fairino_hardware;
-  assert(argc==3);
+  assert(argc==3 || argc==5);
   std::string mode=argv[1]; FairinoHardwareInterface h; auto &r=*h._ptr_robot;
   h._require_gripper_source_clock=true; h._precise_clock=std::make_unique<PreciseControllerClock>();
   h._gripper_evidence.activate(); h._gripper_evidence.incarnation={1,2,3,4};
@@ -29,7 +29,17 @@ int main(int argc, char **argv) {
   if(mode=="command_old_done") r.terminal_scenario=1;
   if(mode=="command_busy_done") r.terminal_scenario=2;
   if(mode=="command_changed_old_done") {r.terminal_scenario=3;h._gripper_settle_time_ms=500;}
-  if(mode=="command_settled") {r.settled=true;h._gripper_settle_time_ms=10;}
+  if(mode=="command_settled") {
+    r.settled=true;h._gripper_settle_time_ms=10;
+    // Fixture completion budget, not the unchanged 80 ms sample-age policy.
+    // Movement, stable-start and settled proof require three causal polls.
+    h._gripper_max_time=1000;
+  }
+  if(argc==5) {
+    if(std::stoi(argv[3])>0) h._gripper_max_time=std::stoi(argv[3]);
+    const int query_delay=std::stoi(argv[4]);
+    r.move_hook=[&,query_delay]{h._precise_clock->delay_ms=query_delay;};
+  }
   if(mode=="command_stale") r.stale=true;
   if(mode=="command_stop") r.move_hook=[&]{std::lock_guard<std::mutex> lock(h._gripper_mutex);h._stop_gripper_thread=true;};
   if(mode=="command_cancel_query") r.move_hook=[&]{h._precise_clock->delay_ms=200;};
@@ -38,7 +48,14 @@ int main(int argc, char **argv) {
   if(mode=="command_late_resume") r.resume_hook=[]{std::this_thread::sleep_for(std::chrono::milliseconds(130));};
   h._jnt_position_command[6]=mode=="command_99" ? .021 : .01176;
   if(mode=="expiry_first" || mode=="expiry_during" || mode.find("command_")==0) {
-    pump(mode=="command_cancel_query" ? 15 : 230);
+    if(mode=="command_settled") {
+      const auto until=std::chrono::steady_clock::now()+std::chrono::milliseconds(h._gripper_max_time+200);
+      while(std::chrono::steady_clock::now()<until && !h._gripper_error) {
+        pump(1);
+        std::lock_guard<std::mutex> lock(h._gripper_mutex);
+        if(h._gripper_evidence.completed==1) break;
+      }
+    } else pump(mode=="command_cancel_query" ? 15 : 230);
     auto stopped_at=std::chrono::steady_clock::now();h.stop_gripper_worker();
     assert(std::chrono::steady_clock::now()-stopped_at<std::chrono::milliseconds(80));
     std::cout<<"{\"moves\":"<<r.moves<<",\"completed\":"<<h._gripper_evidence.completed<<",\"error\":"<<h._gripper_error<<"}\n";
