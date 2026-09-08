@@ -1622,6 +1622,21 @@ def build_physical_runtime(
 
 
 def build_operator_runtime(*, effect_scope: str = "FAKE", **kwargs) -> OperatorRuntime:
+    learned_request = kwargs.pop("learned_request", None)
+    if effect_scope == "LEARNED_RUN" or learned_request is not None:
+        if (effect_scope != "LEARNED_RUN" or learned_request is None
+                or any(kwargs.get(key) is not None for key in ("training_request", "training_output", "curator_run_id", "curator_run_root"))):
+            raise ContractError("LEARNED_WEB_CONFIGURATION")
+        from tools.data_factory.operator.workflow.learned_run import LearnedRunApplication
+        application = LearnedRunApplication(payload=load_json_strict(Path(learned_request)),
+            operator_label=kwargs.get("operator_label", "local-operator"), session_id=kwargs.get("session_id"),
+            run_live_call=kwargs.get("run_live_call"))
+        bridge = LoopbackBridge(core=application.core, ui_root=ROOT / "operator-ui",
+            port=kwargs.get("port", 4174), index_page="learned.html")
+        return OperatorRuntime(bridge=bridge,
+            announcement={"status": "LISTENING", "url": bridge.origin, "effect_scope": "LEARNED_RUN",
+                          "run_id": application.payload["run_id"], "starts_motion": False},
+            close_calls=(application.close, bridge.server.server_close))
     training_request = kwargs.pop("training_request", None)
     training_output = kwargs.pop("training_output", None)
     curator_run_id = kwargs.pop("curator_run_id", None)

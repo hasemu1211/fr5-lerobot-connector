@@ -62,13 +62,15 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="Serve the reusable foreground FR5 collection operator",
     )
-    parser.add_argument("--effect-scope", choices=("FAKE", "PHYSICAL", "TRAINING_REVIEW", "CURATOR_REVIEW"), default="FAKE")
+    parser.add_argument("--effect-scope", choices=("FAKE", "PHYSICAL", "TRAINING_REVIEW", "CURATOR_REVIEW", "LEARNED_RUN"), default="FAKE")
     parser.add_argument("--port", type=int, default=4174)
     parser.add_argument(
         "--repository-root", default=str(Path(__file__).resolve().parents[3]),
     )
     parser.add_argument("--session-id")
     parser.add_argument("--operator-label", default="local-operator")
+    parser.add_argument("--learned-request", type=Path,
+                        help="Server-owned normal live run payload JSON; Web explicitly starts and approves each learned plan")
     parser.add_argument("--training-request", type=Path,
                         help="Review a configured frozen training batch in the Web UI; no robot or collection runtime")
     parser.add_argument("--training-output", type=Path,
@@ -103,6 +105,7 @@ def main(argv=None) -> int:
     values = vars(args)
     values["auto_prepare"] = not values.pop("no_auto_prepare")
     if (args.effect_scope == "FAKE" and args.training_request is None and args.training_output is None
+            and args.learned_request is None
             and args.curator_run_id is None and args.curator_run_root is None):
         values = {
             "effect_scope": "FAKE", "port": args.port,

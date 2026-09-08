@@ -98,7 +98,7 @@ class LoopbackBridge:
             raise ContractError("BRIDGE_PORT")
         self.core = core
         self.ui_root = Path(ui_root).resolve(strict=True)
-        if index_page not in {"index.html", "training.html", "curator.html"}:
+        if index_page not in {"index.html", "training.html", "curator.html", "learned.html"}:
             raise ContractError("BRIDGE_STATIC_PATH")
         if review_video_call is not None and not callable(review_video_call):
             raise ContractError("BRIDGE_REVIEW_VIDEO_CALLABLE")
@@ -240,7 +240,7 @@ class LoopbackBridge:
                 if not target.is_file() or target.is_symlink():
                     return self._error(HTTPStatus.NOT_FOUND, "BRIDGE_STATIC_PATH")
                 payload = target.read_bytes()
-                if relative in {"index.html", "training.html", "curator.html"}:
+                if relative in {"index.html", "training.html", "curator.html", "learned.html"}:
                     marker = b"<!-- OPERATOR_TOKEN -->"
                     injection = (
                         '<meta name="operator-token" content="' + bridge.token + '">'

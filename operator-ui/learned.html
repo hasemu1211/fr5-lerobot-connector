@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- OPERATOR_TOKEN -->
+  <title>FR5 · 학습 정책 실행</title><link rel="stylesheet" href="/styles.css">
+</head>
+<body><main class="learned-run">
+  <p class="step-number">FR5 · HUMAN-GATED LEARNED RUN</p><h1>학습 정책 실행</h1>
+  <p id="learned-run" class="native-identity"></p>
+  <p id="learned-connection" role="status">실행 상태를 확인하고 있습니다.</p>
+  <button id="learned-refresh" type="button">현재 상태 확인</button>
+  <section class="review-card"><h2 id="learned-stage">준비</h2><p id="learned-summary"></p>
+    <p id="learned-binding" class="native-identity"></p>
+    <p id="learned-plan-summary"></p>
+    <div id="learned-actions"></div>
+    <p>한 실행 소유자와 녹화기를 유지합니다. 계속하기는 다음 계획을 준비하며, 실행 전에는 그 계획을 별도로 승인합니다.</p>
+  </section>
+  <section><h2>계획과 판단 근거</h2><pre id="learned-evidence"></pre>
+    <details><summary>정확한 계획 · 전체 정책 출력</summary><pre id="learned-plan"></pre></details>
+  </section>
+  <section id="learned-terminal" hidden><h2>실행 결과와 진단</h2><p id="learned-outcome"></p>
+    <p>청크 실행 완료, 작업 성공 판정, 데이터 저장 및 학습 사용 승인은 별개입니다. 아래는 실행 소유자가 반환한 결과입니다.</p>
+    <pre id="learned-diagnostic"></pre>
+    <details><summary>원래 실행 결과 · 전체 청크 이력</summary><pre id="learned-history"></pre></details>
+  </section>
+  <p>브라우저 연결 유실은 로봇 정지를 뜻하지 않습니다. 연결이 끊기면 이전 사실을 표시하고 결정은 재전송하지 않습니다.</p>
+</main><script src="/learned.js"></script></body></html>

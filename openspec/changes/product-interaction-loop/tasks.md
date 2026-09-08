@@ -1,5 +1,12 @@
 # Product interaction increment
 
+## Native finite learned Web execution
+
+- [x] Bind one server-configured normal live request and actor to existing plan/checkpoint ports and LoopbackBridge, preserving HUMAN_GATED execution separately from Collection.
+- [x] Render initial plan, precontact, completed chunk, fresh continuation plan and original terminal diagnostic with explicit start/approve/continue/finish/cancel choices and read-only response recovery.
+- [x] Exercise actual normal run_live through native HTTP and shipped JavaScript with synthetic model/device seams: two chunks, one owner/recorder, exact displayed plans, response loss, cancellation and stale/replayed/wrong-binding rejection.
+- [x] Document the supported launch and limits; hand off focused regression evidence and immutable source for root integration and separate hardware consumption.
+
 ## 1. Bounded completion recovery
 
 - [x] Reproduce a supported training-review journey with temporary native fixtures and an actual lost response; compare the same canonical output through Web UI and the existing automation client.

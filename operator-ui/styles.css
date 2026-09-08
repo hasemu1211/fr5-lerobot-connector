@@ -20,6 +20,11 @@
 }
 
 * { box-sizing: border-box; }
+.learned-run { max-width: 1100px; margin: auto; padding: 24px; }
+.learned-run section { margin-block: 24px; }
+.learned-run pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 32rem; overflow: auto; }
+.learned-run .native-identity { overflow-wrap: anywhere; }
+#learned-actions { display: flex; flex-wrap: wrap; gap: 12px; }
 .stored-review-panel { margin-block: 1.5rem; padding: 1.5rem; border: 1px solid var(--line); border-radius: .4rem; background: var(--panel); scroll-margin-top: 5rem; }
 #stored-review-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 1rem; margin-bottom: 1rem; }
 #stored-review-controls[hidden] { display: none; }

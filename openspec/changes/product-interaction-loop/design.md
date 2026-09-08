@@ -18,6 +18,26 @@ Before the change, all four replay cases failed the expected read sequence: each
 
 An Orca browser comparison also served the original and revised scripts over separate ephemeral loopback ports with independent copies of the same synthetic fixture. Both journeys clicked prepare and approve, with identical response-loss injection. Before: an error remained until one additional click on “현재 상태 확인”. After: the canonical approval appeared with zero additional refresh clicks. The existing automation client's `view` command independently reported `APPROVED`, no available operations, and `starts_training=false` for both servers. Both paths submitted the approval once. The evidence checkpoint is Orca message `msg_d18f6cffeb6b` in `run_45e15721f588`; no new execution ledger was created.
 
+## Native finite learned Web consumer
+
+Normal finite learned execution already owns inference, planning, one recorder, precontact and assisted continuation. Its required HUMAN_GATED authority differs from the Collection campaign's HIL_NUMERIC_PROXY authority. A small `LearnedRunApplication` adapts the existing `ButtonDecisionPort` and `OperatorCheckpointPort` to one unchanged `run_live` call; extending the campaign console would mix those authorities and add unnecessary campaign state.
+
+Launch the existing entrypoint on an unused loopback port:
+
+```sh
+direnv exec . python3 -m tools.data_factory.operator.cli \
+  --effect-scope LEARNED_RUN --learned-request /server/owned/native-live-request.json \
+  --operator-label operator --port 4180
+```
+
+The JSON is the normal native live **payload**, not the outer run command: it includes `mode: live`, a unique `run_id`, native job/profile/motion/scene paths and output roots, `learned_checkpoint`, and exactly one existing gripper source-clock or temporal-policy input. Existing native validation remains authoritative. The server label must equal `job.operator_or_agent_id`; it is a configured reviewer label, not authenticated human identity. Collection flags do not define this request or confer authority. Starting the server loads configuration and serves the page only; the Web start button begins native preparation, including the normal model/device/recorder startup when used physically.
+
+Web and automation consume `/api/view` and `/api/intent` through the existing token/origin rules and session/revision/digest CAS. Operations are `start_learned_run {}`, `approve_exact_plan {decision_binding_digest}`, `resolve_checkpoint {checkpoint_binding_digest, choice}` and `cancel_learned_run {}`. Bindings come from the current view without transcription. Native choices are PRECONTACT_HUMAN CONFIRM/CANCEL, LEARNED_CHUNK_COMPLETE CONTINUE/PASS/FAIL and LEARNED_NEXT_PLAN APPROVE/CANCEL. CONTINUE only prepares a candidate; its exact plan requires a separate approval. Cancel sets the same native cancellation event and wakes pending checkpoints; the UI waits for native termination rather than asserting stop.
+
+The initial full plan is read once from the owner's preapproval evidence and checked against the decision binding. Later plans arrive from the native next-plan checkpoint. Terminal projection preserves the original returned result and checks the existing `learned_lifecycle_result.json` against its native diagnostic; it does not create another ledger. Polling performs no evidence-file decoding or model calls. Disconnect recovery reads state only; a new process does not recover execution or replay any approval. The original native output files remain the restart diagnostic source.
+
+`tests.data_factory.operator.test_learned_web` drives shipped JavaScript against actual loopback HTTP and normal run_live with injected model/device boundaries. Two chunks share one executor and recorder, while the fixture deliberately ends at PRECOMMIT_SAFETY rather than forging accepted data. Cancellation, response loss and native stale/replay/binding rejection are separately checked. This proves the consumer wiring and truthful diagnostics, not physical smoothness, perception, successful Pick or safe release. Root owns the next physical configuration, qualification and integration.
+
 ## Limits and next consumer
 
 This establishes recovery after a completed synthetic transaction, not a measured improvement in human task duration, policy learning, physical success or real failure frequency. No GPU, hardware, production inventory or standing delegation was used or modified. An interrupted request that leaves the backend still `PREPARING` or `PUBLISHING` is a separate, unverified continuation case; a future bounded dogfood should determine whether it needs the existing view-watch capability. Learning retains publication and admission semantics; root decides the next increment and integration.

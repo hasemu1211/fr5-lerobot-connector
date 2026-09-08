@@ -2,6 +2,31 @@
 
 ## ADDED Requirements
 
+### Requirement: Human-gated finite learned execution is operable through Web
+
+The product SHALL expose one normal finite learned `run_live` through the existing loopback intent core and exact plan/checkpoint ports. A server-owned native live request and actor SHALL bind the entry; the browser SHALL start preparation and supply explicit choices only. Collection campaign authority SHALL remain separate because its numeric-proxy approval is not learned HUMAN_GATED authority. Root's next consumer is a separately authorized hardware run using the same native request and Web controls.
+
+#### Scenario: Inspect and approve an assisted continuation
+
+- **WHEN** the person starts a configured learned run from Web
+- **THEN** the screen presents the owner's initial exact plan, policy output, duration meaning and evidence before explicit approval, followed by the existing precontact choice
+- **AND** after a completed chunk, continue prepares a fresh candidate without approving it; the next exact plan and its changed identity require an explicit approval before the next precontact decision
+- **AND** one normal execution owner and recorder remain responsible throughout; finish supplies the existing semantic choice and does not imply safe release, dataset commit, training authority or physical task effectiveness.
+
+#### Scenario: Cancel or lose a decision response
+
+- **WHEN** the person cancels a pending plan or checkpoint, or loses a decision response
+- **THEN** cancellation reaches the existing owner and the Web distinguishes a cancellation request from confirmed termination; cancellation of the next plan executes no second chunk
+- **AND** the browser recovers by bounded state reads without repeating any decision; stale views, wrong plan/checkpoint bindings and repeated intent IDs remain rejected by the native core
+- **AND** unavailable state retains explicitly stale facts with disabled decisions; malformed or wrong-session views require explicit refresh, and connection loss never asserts robot stop.
+
+#### Scenario: Preserve the original terminal result
+
+- **WHEN** the native run finishes or fails
+- **THEN** Web exposes the original returned diagnostic and the existing canonical lifecycle result, including full policy output and chunk history when produced, without inventing an episode ledger
+- **AND** a software fixture that completes two chunks but fails precommit safety remains visibly failed with its original recorder disposition; it is not reported as a successful physical task or accepted recording
+- **AND** process restart never starts or resumes motion automatically; canonical run/output ownership and all existing gates remain authoritative.
+
 ### Requirement: Demonstration trial choices are grounded in recorded duration
 
 Collection motion trial selection SHALL state the intended demonstration timing and task boundary before treating planner percentages as a candidate choice. Existing phase policy SHALL be reused when it meets the bounded timing hypothesis. Reference demonstrations SHALL remain evidence of possible cadence, not FR5 safety limits, matched-task performance or physical qualification. The current constraint is that only root may validate candidate motion physically; the next consumer is the existing finite TEST_COLLECTION flow and exact-plan execution owner.
