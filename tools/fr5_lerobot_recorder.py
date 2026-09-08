@@ -686,12 +686,15 @@ class FR5LeRobotRecorder(Node):
             problems.append("committed dataset snapshot changed")
         return "; ".join(problems)
 
-    def _persist_quarantine(self, reason_code: str, detail: str) -> dict:
+    def _persist_quarantine(
+        self, reason_code: str, detail: str, *, invalidate_training: bool = True,
+    ) -> dict:
         errors = []
-        try:
-            self._unlink_durable(self.args.root / "meta" / "training_approved.json")
-        except Exception as exc:
-            errors.append(f"approval invalidation failed: {exc}")
+        if invalidate_training:
+            try:
+                self._unlink_durable(self.args.root / "meta" / "training_approved.json")
+            except Exception as exc:
+                errors.append(f"approval invalidation failed: {exc}")
         try:
             self._write_commit_guard(self.QUARANTINED_COMMIT, reason_code, detail)
         except Exception as exc:
@@ -1272,7 +1275,11 @@ class FR5LeRobotRecorder(Node):
         except Exception as exc:
             receipt["durable"] = False
             receipt["save_uncertain"] = True
-            result = self._persist_quarantine("RETENTION_SAVE_UNCERTAIN", str(exc))
+            # Diagnostic publication does not mutate the committed dataset or
+            # gain authority to revoke its existing training approval.
+            result = self._persist_quarantine(
+                "RETENTION_SAVE_UNCERTAIN", str(exc), invalidate_training=False,
+            )
             self._retention_result = {**result, "retention": receipt}
         return self._retention_result
 

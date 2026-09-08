@@ -156,6 +156,9 @@ class RecorderTransactionTest(unittest.TestCase):
         for failure in ("corrupt", "save"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
                 recorder = self.retention_fixture(directory)
+                approval = recorder.args.root / "meta" / "training_approved.json"
+                approval.write_bytes(b'{"existing_committed_data": "approved"}\n')
+                original_approval = approval.read_bytes()
                 if failure == "corrupt":
                     Path(recorder.dataset.writer.episode_buffer["observation.images.up"][0]).write_bytes(b"corrupt")
                     result = self.retain_control(recorder)
@@ -177,6 +180,7 @@ class RecorderTransactionTest(unittest.TestCase):
                     self.assertFalse(recorder.abort_episode()["ok"])
                     run_recorder_control_jsonl(recorder, io.StringIO(""), io.StringIO(), lambda: None)
                     self.assertTrue(list(destination.rglob("*.parquet")))
+                self.assertEqual(approval.read_bytes(), original_approval)
                 recorder._release_transaction_lock()
 
     def test_retention_invalid_binding_and_destination_have_no_effects(self):
