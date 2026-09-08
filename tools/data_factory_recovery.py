@@ -631,7 +631,7 @@ def _validate_manifest(root: Path, run_root: Path, guard: dict, manifest_path: P
     return paths
 
 
-def _recovery_events(path: Path, guard: dict, directory_fd: int | None = None) -> tuple[list[dict], dict, bool]:
+def _recovery_events(path: Path, guard: dict, directory_fd: int | None = None, *, allow_readiness_trim=False) -> tuple[list[dict], dict, bool]:
     try:
         if directory_fd is None:
             if path.is_symlink() or not path.is_file():
@@ -674,7 +674,9 @@ def _recovery_events(path: Path, guard: dict, directory_fd: int | None = None) -
     expected = [("RECORDING", "BEGIN")]
     if guard["state"] == "FROZEN":
         expected.append(("FROZEN", "FROZEN"))
-    if [(event["state"], event["reason_code"]) for event in events] != expected:
+    if [(event["state"], event["reason_code"]) for event in events
+        if not (allow_readiness_trim and event["state"] == "RECORDING"
+                and event["reason_code"] == "READINESS_PREFIX_TRIMMED")] != expected:
         raise RecoveryError("RECOVERY_EVENT", "event log does not match the durable guard state")
     return events, recovered, already_recovered
 
@@ -714,6 +716,77 @@ def _quarantine(guard_path: Path, guard: dict, reason: str, meta_fd: int | None 
     except OSError as exc:
         state, detail = guard.get("state", "UNKNOWN"), f"guard update failed: {exc}"
     return {"ok": False, "state": state, "reason_code": reason, "run_id": guard["run_id"], "detail": detail}
+
+
+def committed_content_digests(root: Path | str) -> dict[str, str]:
+    """Content proof held by the live native owner, without changing disk schemas."""
+    root = Path(root)
+    snapshot = dataset_snapshot(root)
+    paths = set()
+    for field in ("data_parquet", "committed_videos", "episode_metadata",
+                  "dataset_metadata", "source_provenance"):
+        paths.update(snapshot[field])
+    if (root / "meta/recording_quality.jsonl").exists():
+        paths.add("meta/recording_quality.jsonl")
+    result = {}
+    for relative in sorted(paths):
+        path = root / relative
+        if any(parent.is_symlink() for parent in (path, *path.parents)):
+            raise RecoveryError("RECOVERY_SYMLINK", "unsafe committed content")
+        with path.open("rb") as file:
+            result[relative] = hashlib.file_digest(file, "sha256").hexdigest()
+    return result
+
+
+def validate_native_retention_source(root, runs, transaction, lock, *, retaining=False):
+    """Validate the live owner's frozen source before irreversible staging cleanup.
+
+    This does not authorize orphan recovery from a persisted retention boolean.
+    The caller must also prove the native archive against its settled row buffer.
+    """
+    root, runs = Path(root).resolve(), Path(runs).resolve()
+    if (lock is None or lock.fd is None or lock.path != root / ".data_factory_transaction.lock"
+            or lock.path.is_symlink() or not os.path.samestat(os.fstat(lock.fd), lock.path.stat())):
+        raise RecoveryError("RETENTION_OWNERSHIP", "native transaction lock is not held")
+    meta_fd = _open_directory(root / "meta")
+    run_fd = None
+    try:
+        _, guard, manifest_path, manifest, run_fd = _validate_guard(root, runs, meta_fd)
+        paths = _validate_manifest(root, runs, guard, manifest_path, manifest)
+        expected_state = "QUARANTINED_COMMIT" if retaining else "FROZEN"
+        if (guard["state"] not in ({expected_state} if retaining else {"FROZEN", "QUARANTINED_COMMIT"})
+                or retaining and guard["reason_code"] != "RETENTION_STARTED"
+                or any(guard[key] != transaction[key] for key in
+                       ("run_id", "transaction_id", "episode_index", "staging_manifest_digest"))
+                or manifest["begin_snapshot"] != transaction["begin_snapshot"]):
+            raise RecoveryError("RETENTION_TRANSACTION", "native frozen transaction proof mismatch")
+        owner = _owner_record(guard["run_id"], guard["transaction_id"],
+                              guard["episode_index"], guard["staging_manifest_digest"])
+        payload_paths = set()
+        for path in paths:
+            for payload in path.rglob("*"):
+                if payload.is_symlink():
+                    raise RecoveryError("RECOVERY_SYMLINK", "unsafe staging payload")
+                if payload.is_file() and payload != path / _STAGING_OWNER_FILE:
+                    payload_paths.add(payload)
+            fd = _open_directory(path)
+            try:
+                if _json_at(fd, _STAGING_OWNER_FILE, "RECOVERY_STAGING_OWNER") != owner:
+                    raise RecoveryError("RECOVERY_STAGING_OWNER", "staging ownership marker mismatch")
+            finally:
+                os.close(fd)
+        if not retaining and guard["state"] == "QUARANTINED_COMMIT":
+            raise RecoveryError("RETENTION_SOURCE_QUARANTINED", "source already quarantined")
+        _recovery_events(runs / guard["run_id"] / "events.jsonl",
+                         dict(guard, state="FROZEN"), run_fd, allow_readiness_trim=True)
+        if (not dataset_snapshot_unchanged(manifest["begin_snapshot"], dataset_snapshot(root))
+                or committed_content_digests(root) != transaction.get("begin_content_digests")):
+            raise RecoveryError("RECOVERY_SNAPSHOT_CHANGED", "committed source changed")
+        return payload_paths
+    finally:
+        if run_fd is not None:
+            os.close(run_fd)
+        os.close(meta_fd)
 
 
 def recover_orphaned_transaction(dataset_root: Path | str, run_root: Path | str) -> dict:

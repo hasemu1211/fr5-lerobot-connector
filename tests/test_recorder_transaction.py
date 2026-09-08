@@ -87,7 +87,7 @@ class RecorderTransactionTest(unittest.TestCase):
         "transaction_id", "episode_index", "metrics", "artifacts", "detail",
     }
 
-    def retention_fixture(self, directory, *, run_id="run-001"):
+    def retention_fixture(self, directory, *, run_id="run-001", committed_episode=False, trim_prefix=False):
         from lerobot.datasets.lerobot_dataset import LeRobotDataset
         import numpy as np
         recorder = self.make_recorder(directory)
@@ -102,6 +102,16 @@ class RecorderTransactionTest(unittest.TestCase):
             repo_id="tests/retention", root=recorder.args.root, fps=30,
             features=features, use_videos=False, image_writer_threads=0,
         )
+        if committed_episode:
+            recorder.dataset.add_frame({
+                "task": "existing committed episode",
+                "observation.state": np.array([10, 11], dtype=np.float32),
+                "action": np.array([12, 13], dtype=np.float32),
+                **{f"observation.images.{camera}": np.full((8, 8, 3), 99, dtype=np.uint8)
+                   for camera in recorder.camera_names},
+            })
+            recorder.dataset.save_episode(parallel_encoding=False)
+            recorder.dataset.finalize()
         recorder.begin_episode({**self.transaction(directory), "run_id": run_id})
         for index in range(2):
             recorder.dataset.add_frame({
@@ -113,6 +123,19 @@ class RecorderTransactionTest(unittest.TestCase):
             })
             recorder.source_provenance.append({"phase": "MECHANICAL_RELEASE", "target_ros_s": index / 30})
         recorder.frames = 2
+        if trim_prefix:
+            with mock.patch.object(recorder, "_quality_snapshot", return_value={"accepted": True, "reasons": [], "frames": 2}):
+                self.assertTrue(recorder.trim_readiness_prefix()["ok"])
+            for index in range(2):
+                recorder.dataset.add_frame({
+                    "task": "mechanical release diagnostic",
+                    "observation.state": np.array([index, 1], dtype=np.float32),
+                    "action": np.array([index, 2], dtype=np.float32),
+                    **{f"observation.images.{camera}": np.full((8, 8, 3), 40 + index, dtype=np.uint8)
+                       for camera in recorder.camera_names},
+                })
+                recorder.source_provenance.append({"phase": "MECHANICAL_RELEASE", "target_ros_s": index / 30})
+            recorder.frames = 2
         recorder.freeze_episode()
         return recorder
 
@@ -133,11 +156,18 @@ class RecorderTransactionTest(unittest.TestCase):
                 self.assertTrue(result["ok"], result)
                 receipt = result["retention"]
                 self.assertTrue(receipt["durable"])
+                self.assertEqual(result["state"], recorder.ABORTED, result)
+                self.assertEqual(receipt["staging_state"], "RELEASED")
+                self.assertFalse(receipt["quarantined"])
+                self.assertFalse(Path(recorder._transaction["guard_path"]).exists())
+                self.assertTrue(all(not Path(path).exists() for path in recorder._transaction["staging_dirs"]))
                 self.assertFalse(receipt["training_eligible"])
                 self.assertFalse(receipt["partial"])
                 destination = Path(receipt["destination"])
                 self.assertEqual(json.loads((destination / "meta/info.json").read_text())["total_frames"], 2)
-                self.assertEqual(json.loads((destination / "provenance.json").read_text())["rows"][0]["provenance"]["phase"], "MECHANICAL_RELEASE")
+                self.assertEqual(json.loads((destination / "provenance.json").read_text())["rows"],
+                                 [{"source_row": index, "provenance": source}
+                                  for index, source in enumerate(recorder.source_provenance)])
                 import pyarrow.parquet as pq
                 table = pq.read_table(next((destination / "data").rglob("*.parquet"))).to_pydict()
                 self.assertEqual(table["observation.state"], [[0.0, 1.0], [1.0, 1.0]])
@@ -180,8 +210,114 @@ class RecorderTransactionTest(unittest.TestCase):
                     self.assertFalse(recorder.abort_episode()["ok"])
                     run_recorder_control_jsonl(recorder, io.StringIO(""), io.StringIO(), lambda: None)
                     self.assertTrue(list(destination.rglob("*.parquet")))
+                self.assertEqual(result["retention"]["staging_state"], "QUARANTINED")
+                self.assertTrue(Path(recorder._transaction["guard_path"]).exists())
+                self.assertTrue(all(Path(path).exists() for path in recorder._transaction["staging_dirs"]))
                 self.assertEqual(approval.read_bytes(), original_approval)
                 recorder._release_transaction_lock()
+
+    def test_retention_release_allows_next_native_begin(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = self.retention_fixture(directory, committed_episode=True, trim_prefix=True)
+            committed_before = {str(path): path.read_bytes() for path in recorder.args.root.rglob("*")
+                                if path.is_file() and "images" not in path.parts
+                                and path.name not in {"quarantine.json", ".data_factory_transaction.lock"}}
+            output = io.StringIO()
+            command = {"schema_version": "data_factory.recorder_command.v1", "op_id": "retain",
+                       "op": "retain", "transaction_id": recorder._transaction["transaction_id"],
+                       "disposition": "cancel"}
+            self.assertTrue(run_recorder_control_jsonl(
+                recorder, io.StringIO(json.dumps(command) + "\n"), output, lambda: None))
+            receipt = json.loads(output.getvalue())["retention"]
+            self.assertEqual(receipt["staging_state"], "RELEASED")
+            self.assertEqual(json.loads((Path(receipt["destination"]) / "retention.json").read_text()), receipt)
+            self.assertEqual(recover_orphaned_transaction(recorder.args.root, recorder.args.run_root)["state"], "NO_GUARD")
+            for path, contents in committed_before.items():
+                self.assertEqual(Path(path).read_bytes(), contents)
+            next_recorder = self.make_recorder(directory)
+            next_recorder.dataset = recorder.dataset
+            result = next_recorder.begin_episode({**self.transaction(directory), "run_id": "run-002"})
+            self.assertTrue(result["ok"], result)
+            self.assertTrue(next_recorder.abort_episode()["ok"])
+
+    def test_retention_refuses_unsafe_release(self):
+        from lerobot.datasets.lerobot_dataset import LeRobotDataset
+        for failure in ("changed", "same_stat_changed", "during_save", "missing_rows",
+                        "foreign_owner", "foreign_lock", "invalid_manifest", "committing", "clear",
+                        "source_changed", "publication_corrupt", "publication_missing", "guard_unlink", "extra_staging"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                recorder = self.retention_fixture(directory)
+                committed = recorder.args.root / "meta/info.json"
+                initial = committed.read_bytes()
+                stat = committed.stat()
+                guard = Path(recorder._transaction["guard_path"])
+                foreign = None
+                if failure in {"changed", "same_stat_changed"}:
+                    committed.write_bytes(initial.replace(b'fr5', b'xx5') if b'fr5' in initial else initial.replace(b'30', b'31', 1))
+                    if failure == "same_stat_changed":
+                        os.utime(committed, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+                elif failure == "extra_staging":
+                    (Path(recorder._transaction["staging_dirs"][0]) / "unbuffered.png").write_bytes(b"unretained")
+                elif failure == "missing_rows":
+                    recorder.frames = 1
+                elif failure == "foreign_owner":
+                    marker = next(Path(recorder._transaction["staging_dirs"][0]).glob(".*json"))
+                    marker.write_text("{}")
+                elif failure == "foreign_lock":
+                    recorder._release_transaction_lock()
+                    foreign = DatasetTransactionLock(recorder.args.root)
+                    foreign.acquire()
+                elif failure == "invalid_manifest":
+                    Path(recorder._transaction["artifacts"]["staging_manifest"]).write_text("{}")
+                elif failure == "committing":
+                    recorder._write_commit_guard(recorder.COMMITTING, "COMMIT_STARTED")
+                original = LeRobotDataset.save_episode
+                def save(dataset, *args, **kwargs):
+                    original(dataset, *args, **kwargs)
+                    if failure == "during_save":
+                        committed.write_bytes(initial + b" ")
+                    elif failure == "source_changed":
+                        recorder.dataset.writer.episode_buffer["action"][0][0] = 42
+                    elif failure == "publication_corrupt":
+                        import pyarrow as pa
+                        import pyarrow.parquet as pq
+                        path = next((dataset.root / "data").rglob("*.parquet"))
+                        table = pq.read_table(path)
+                        rows = table.to_pylist()
+                        rows[0]["action"][0] = 42
+                        pq.write_table(pa.Table.from_pylist(rows, schema=table.schema), path)
+                    elif failure == "publication_missing":
+                        next((dataset.root / "data").rglob("*.parquet")).unlink()
+                clear = recorder.dataset.clear_episode_buffer
+                def clear_buffer():
+                    if failure == "clear":
+                        raise OSError("clear failed")
+                    clear()
+                guard_before = guard.read_bytes()
+                unlink = recorder._unlink_durable
+                def unlink_guard(path):
+                    if failure == "guard_unlink" and Path(path) == guard:
+                        raise OSError("guard unlink failed")
+                    unlink(path)
+                with mock.patch.object(recorder, "_unlink_durable", unlink_guard), mock.patch.object(LeRobotDataset, "save_episode", save), mock.patch.object(
+                        recorder.dataset, "clear_episode_buffer", clear_buffer):
+                    result = self.retain_control(recorder)
+                self.assertNotEqual(result["state"], recorder.ABORTED, result)
+                self.assertTrue(guard.exists())
+                if failure != "guard_unlink":
+                    self.assertTrue(all(Path(path).exists() for path in recorder._transaction["staging_dirs"]))
+                if failure in {"foreign_owner", "foreign_lock", "invalid_manifest", "committing"}:
+                    self.assertEqual(guard.read_bytes(), guard_before)
+                else:
+                    self.assertEqual(result["retention"]["staging_state"], "QUARANTINED")
+                    self.assertEqual(result["retention"]["durable"],
+                                     failure not in {"publication_corrupt", "publication_missing"}, result)
+                if foreign:
+                    self.assertFalse(recover_orphaned_transaction(recorder.args.root, recorder.args.run_root)["ok"])
+                    foreign.release()
+                recorder._release_transaction_lock()
+                if failure != "foreign_lock":
+                    self.assertFalse(recover_orphaned_transaction(recorder.args.root, recorder.args.run_root)["ok"])
 
     def test_retention_invalid_binding_and_destination_have_no_effects(self):
         with tempfile.TemporaryDirectory() as directory:

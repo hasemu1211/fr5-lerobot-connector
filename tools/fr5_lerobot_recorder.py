@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
+import hashlib
+import io
 import json
 import multiprocessing
 import os
@@ -29,9 +31,11 @@ from data_factory_recovery import (
     RecoveryError,
     canonical_json_digest,
     claim_staging_directories,
+    committed_content_digests,
     dataset_snapshot,
     dataset_snapshot_unchanged,
     decode_json_strict,
+    validate_native_retention_source,
     write_json_atomic,
 )
 from fr5_dataset_schema import ARM_NAMES, CAMERA_PROFILES, GRIPPER_NAME, QUALITY_LIMITS, dataset_features
@@ -632,6 +636,7 @@ class FR5LeRobotRecorder(Node):
             "result_path": result_path,
             "guard_path": guard_path,
             "begin_snapshot": manifest["begin_snapshot"],
+            "begin_content_digests": committed_content_digests(root),
             "staging_manifest_digest": manifest_digest,
             "staging_dirs": tuple(staging_dirs.values()),
             "artifacts": {
@@ -1142,6 +1147,12 @@ class FR5LeRobotRecorder(Node):
                 )
             try:
                 self.dataset.clear_episode_buffer()
+                if self._transaction:
+                    claim_staging_directories(
+                        self.args.root, list(self.camera_names),
+                        self._transaction["run_id"], self._transaction["transaction_id"],
+                        self._transaction["episode_index"], self._transaction["staging_manifest_digest"],
+                    )
             except Exception as exc:
                 self.recording = True
                 return self._result(False, "READINESS_PREFIX_CLEAR_FAILED", detail=str(exc))
@@ -1165,7 +1176,7 @@ class FR5LeRobotRecorder(Node):
             self._buffer_cleared = True
 
     def retain_episode(self, transaction_id: str, disposition: str) -> dict:
-        """Publish diagnostic evidence only; source staging remains quarantined.
+        """Publish diagnostic evidence, releasing only a proven fully retained source.
 
         This is deliberately terminal, including failed saves. A retry can inspect
         the receipt but cannot clear, overwrite, or republish an uncertain save.
@@ -1192,6 +1203,16 @@ class FR5LeRobotRecorder(Node):
             return self._result(False, "RETENTION_DESTINATION_CONFLICT")
         if self.episode_state == self.RECORDING:
             self.freeze_episode()
+        release_error = ""
+        try:
+            validate_native_retention_source(self.args.root, self.args.run_root, transaction,
+                                             self._transaction_lock)
+        except RecoveryError as exc:
+            if exc.code not in {"RECOVERY_SNAPSHOT_CHANGED", "RECOVERY_EVENT", "RETENTION_SOURCE_QUARANTINED"}:
+                return self._result(False, exc.code, detail=str(exc))
+            release_error = str(exc)
+        except Exception as exc:
+            return self._result(False, "RETENTION_SOURCE_INVALID", detail=str(exc))
         with self.lock:
             if self.episode_state not in (self.FROZEN, self.QUARANTINED_COMMIT):
                 return self._result(False, "STATE_RETENTION_NOT_ALLOWED")
@@ -1209,9 +1230,11 @@ class FR5LeRobotRecorder(Node):
             "training_eligible": False, "quality_accepted": False,
             "durable": False, "partial": True, "quarantined": True,
             "save_uncertain": False, "rows": 0, "available_rows": self.frames,
+            "staging_state": "QUARANTINED", "release_detail": release_error,
         }
         # Install the latch before effects: even a persistence exception is terminal.
         self._retention_result = self._result(False, "RETENTION_SAVE_UNCERTAIN", retention=receipt)
+        publication_complete = False
         try:
             self._write_commit_guard(self.QUARANTINED_COMMIT, "RETENTION_STARTED")
             self._drain_image_writer()
@@ -1228,8 +1251,15 @@ class FR5LeRobotRecorder(Node):
                 features=features, robot_type="fr5_ros2", use_videos=False,
                 image_writer_threads=0,
             )
+            source_provenance_digest = canonical_json_digest(self.source_provenance)
             corrupt = []
             provenance = []
+            retained_rows = []
+
+            def value_digest(value, spec):
+                array = np.asarray(value, dtype="uint8" if spec["dtype"] == "image" else spec["dtype"])
+                return (array.shape, hashlib.sha256(array.tobytes()).digest())
+
             for index in range(min(self.frames, buffer["size"])):
                 try:
                     frame = {"task": buffer["task"][index]}
@@ -1250,15 +1280,44 @@ class FR5LeRobotRecorder(Node):
                     corrupt.append({"source_row": index, "detail": str(exc)})
                     continue
                 diagnostic.add_frame(frame)
+                retained_rows.append({key: value_digest(frame[key], spec)
+                                      for key, spec in features.items()})
                 provenance.append({"source_row": index, "provenance": source})
             receipt["rows"] = len(provenance)
             receipt["corrupt_rows"] = corrupt
-            receipt["partial"] = len(provenance) != self.frames or not self.frames
+            receipt["partial"] = (len(provenance) != self.frames or not self.frames
+                                  or buffer["size"] != self.frames
+                                  or len(self.source_provenance) != self.frames)
             receipt["save_uncertain"] = True
             if provenance:
                 diagnostic.save_episode(parallel_encoding=False)
             diagnostic.finalize()
+            # Read the installed writer's actual publication back, including RGB
+            # pixels and numeric rows; a successful save call is not evidence.
+            import pyarrow.parquet as pq
+            info = json.loads((destination / "meta/info.json").read_text())
+            if (info["total_frames"] != len(retained_rows)
+                    or info["total_episodes"] != int(bool(retained_rows))):
+                raise ValueError("diagnostic publication metadata mismatch")
+            published_rows = 0
+            for path in sorted((destination / "data").rglob("*.parquet")):
+                for batch in pq.ParquetFile(path).iter_batches(batch_size=1):
+                    for saved in batch.to_pylist():
+                        if published_rows >= len(retained_rows):
+                            raise ValueError("diagnostic publication has extra rows")
+                        for key, spec in features.items():
+                            value = saved[key]
+                            if spec["dtype"] == "image":
+                                with PILImage.open(io.BytesIO(value["bytes"])) as image:
+                                    value = np.array(image.convert("RGB"))
+                            if value_digest(value, spec) != retained_rows[published_rows][key]:
+                                raise ValueError(f"diagnostic publication mismatch: {key}")
+                        published_rows += 1
+            if published_rows != len(retained_rows):
+                raise ValueError("diagnostic publication row count mismatch")
             self._write_json_atomic(destination / "provenance.json", {"rows": provenance})
+            if json.loads((destination / "provenance.json").read_text()) != {"rows": provenance}:
+                raise ValueError("diagnostic provenance publication mismatch")
             # fsync native writer output before issuing a durable receipt.
             for path in sorted(destination.rglob("*"), reverse=True):
                 fd = os.open(path, os.O_RDONLY)
@@ -1269,12 +1328,81 @@ class FR5LeRobotRecorder(Node):
             receipt["durable"] = True
             receipt["save_uncertain"] = False
             self._write_json_atomic(destination / "retention.json", receipt)
+            parent_fd = os.open(destination.parent, os.O_RDONLY)
+            try:
+                os.fsync(parent_fd)
+            finally:
+                os.close(parent_fd)
+            publication_complete = True
+            if not receipt["partial"] and not release_error:
+                try:
+                    payload_paths = validate_native_retention_source(
+                        self.args.root, self.args.run_root, transaction,
+                        self._transaction_lock, retaining=True,
+                    )
+                    expected_paths = {Path(buffer[key][index])
+                                      for key, spec in features.items() if spec["dtype"] == "image"
+                                      for index in range(self.frames)}
+                    if payload_paths != expected_paths:
+                        raise RuntimeError("staging contains unretained payload")
+                    if (self.frames != len(retained_rows) or buffer["size"] != self.frames
+                            or canonical_json_digest(self.source_provenance) != source_provenance_digest):
+                        raise RuntimeError("source rows or provenance changed during retention")
+                    for index, expected in enumerate(retained_rows):
+                        for key, spec in features.items():
+                            value = buffer[key][index]
+                            if spec["dtype"] == "image":
+                                path = Path(value)
+                                if any(parent.is_symlink() for parent in (path, *path.parents)):
+                                    raise RuntimeError("source image became a symlink")
+                                with PILImage.open(path) as image:
+                                    value = np.array(image.convert("RGB"))
+                            if value_digest(value, spec) != expected[key]:
+                                raise RuntimeError("source row changed during retention")
+                    self._clear_episode_buffer_once()
+                    for staging in transaction["staging_dirs"]:
+                        parent_fd = os.open(Path(staging).parent, os.O_RDONLY)
+                        try:
+                            os.fsync(parent_fd)
+                        finally:
+                            os.close(parent_fd)
+                    cleanup_error = self._abort_cleanup_error()
+                    if cleanup_error:
+                        raise RuntimeError(cleanup_error)
+                    if committed_content_digests(self.args.root) != transaction["begin_content_digests"]:
+                        raise RuntimeError("committed source content changed")
+                    self.episode_state = self.ABORTED
+                    self._write_run_result(self.ABORTED, "DIAGNOSTIC_RETAINED_RELEASED")
+                    self._append_event("DIAGNOSTIC_RETAINED_RELEASED")
+                    receipt["quarantined"] = False
+                    receipt["staging_state"] = "RELEASED"
+                    self._write_json_atomic(destination / "retention.json", receipt)
+                    self._unlink_durable(transaction["guard_path"])
+                    self._release_transaction_lock()
+                    self._retention_result = self._result(
+                        True, "DIAGNOSTIC_RETAINED_RELEASED", retention=receipt,
+                    )
+                    return self._retention_result
+                except Exception as exc:
+                    receipt["release_detail"] = str(exc)
+                    receipt["quarantined"] = True
+                    receipt["staging_state"] = "QUARANTINED"
+                    self.episode_state = self.QUARANTINED_COMMIT
+                    try:
+                        self._write_json_atomic(destination / "retention.json", receipt)
+                    except Exception as receipt_exc:
+                        receipt["release_detail"] += f"; receipt update failed: {receipt_exc}"
+                    result = self._persist_quarantine(
+                        "RETENTION_RELEASE_FAILED", str(exc), invalidate_training=False,
+                    )
+                    self._retention_result = {**result, "retention": receipt}
+                    return self._retention_result
             self._write_run_result(self.QUARANTINED_COMMIT, "DIAGNOSTIC_RETAINED")
             self._append_event("DIAGNOSTIC_RETAINED")
             self._retention_result = self._result(True, "DIAGNOSTIC_RETAINED", retention=receipt)
         except Exception as exc:
-            receipt["durable"] = False
-            receipt["save_uncertain"] = True
+            receipt["durable"] = publication_complete
+            receipt["save_uncertain"] = not publication_complete
             # Diagnostic publication does not mutate the committed dataset or
             # gain authority to revoke its existing training approval.
             result = self._persist_quarantine(
