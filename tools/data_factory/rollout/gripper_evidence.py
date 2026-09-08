@@ -1,7 +1,8 @@
 """Native held-command evidence, carried by the existing dynamic state broadcaster.
 
-The controller calendar is not UTC. A bounded, same-incarnation clock mapping
-must be supplied by the runtime owner; this module does not estimate or approve it.
+The controller calendar is not UTC. Archived v1/v2 evidence retains its supplied
+clock mapping. Live v3 uses exact causal query brackets and owner-selected bounds;
+this module neither estimates offsets nor approves execution.
 """
 from __future__ import annotations
 
@@ -31,6 +32,43 @@ CURRENT_FIELDS = (
     "certificate_incarnation_0", "certificate_incarnation_1", "certificate_incarnation_2", "certificate_incarnation_3", "host_clock_tolerance_s",
 )
 LIVE_FIELDS = FIELDS + CURRENT_FIELDS
+
+CAUSAL_FIELDS = LIVE_FIELDS + (
+    "sample_position_percent", "sample_motion_done", "sample_fault", "ack_system_s", "ack_steady_s",
+    "terminal_frame", "terminal_sample_system_s", "terminal_sample_steady_s", "terminal_position_percent", "terminal_motion_done", "terminal_fault",
+    "terminal_query_before_controller_s", "terminal_query_after_controller_s", "terminal_query_before_system_s", "terminal_query_before_steady_s",
+    "terminal_query_after_system_s", "terminal_query_after_steady_s", "terminal_max_age_s", "terminal_host_clock_tolerance_s",
+    "terminal_reference_m", "terminal_generation", "terminal_incarnation_0", "terminal_incarnation_1", "terminal_incarnation_2", "terminal_incarnation_3",
+)
+
+
+def validate_temporal_policy(policy):
+    """Live owner-selected bounds, not a calendar-offset estimate or approval."""
+    try:
+        if set(policy) != {"schema_version", "incarnation", "max_age_s", "host_clock_tolerance_s"} or policy["schema_version"] != "fr5.gripper_temporal_policy.v1":
+            raise ValueError()
+        ids = policy["incarnation"]
+        if not isinstance(ids, list) or len(ids) != 4 or not any(ids):
+            raise ValueError()
+        for value in ids:
+            integer(value, 2**32-1)
+        if number(policy["max_age_s"]) <= 0 or number(policy["host_clock_tolerance_s"]) < 0:
+            raise ValueError()
+        return copy.deepcopy(policy)
+    except (KeyError, TypeError, ValueError, ContractError) as exc:
+        raise ContractError("LEARNED_HARDWARE_TEMPORAL_POLICY") from exc
+
+
+def native_temporal_parameter(policy):
+    """Atomic gripper_temporal_policy_v1 double-array; explicitly configured by LIVE owner."""
+    policy = validate_temporal_policy(policy)
+    return [1., *map(float, policy["incarnation"]), float(policy["max_age_s"]), float(policy["host_clock_tolerance_s"])]
+
+
+def validate_evidence_binding(binding):
+    if isinstance(binding, dict) and binding.get("schema_version") == "fr5.gripper_temporal_policy.v1":
+        return validate_temporal_policy(binding)
+    return validate_clock_binding(binding)
 
 CALENDAR = ("year", "month", "day", "hour", "minute", "second", "millisecond")
 CLOCK_FIELDS = {"schema_version", "incarnation", "calendar_to_system_offset_s", "uncertainty_s",
@@ -98,12 +136,12 @@ def decode_dynamic_state(message, binding, received_steady_s):
             raise ValueError()
         values = message.interface_values[names.index(RESOURCE)]
         fields = list(values.interface_names)
-        if len(fields) != len(set(fields)) or set(fields) not in (set(FIELDS), set(LIVE_FIELDS)) or len(fields) != len(values.values):
+        if len(fields) != len(set(fields)) or set(fields) not in (set(FIELDS), set(LIVE_FIELDS), set(CAUSAL_FIELDS)) or len(fields) != len(values.values):
             raise ValueError()
         wire = dict(zip(fields, values.values))
         for value in wire.values():
             number(value)
-        return {"wire": wire, "clock_binding": validate_clock_binding(binding),
+        return {"wire": wire, "clock_binding": validate_evidence_binding(binding),
                 "received_steady_s": number(received_steady_s)}
     except (AttributeError, TypeError, ValueError, KeyError) as exc:
         raise ContractError("LEARNED_HARDWARE_SCHEMA") from exc
@@ -143,17 +181,44 @@ def check_current_bracket(wire, now, steady_now, max_age_s):
         raise ContractError("LEARNED_HARDWARE_STALE")
 
 
+def check_causal_command_proof(w, now, steady_now, max_age_s, *, completion=False):
+    """Validate frozen terminal evidence at decision time; renewal is CURRENT only."""
+    at, mono = w["proof_system_s"], w["proof_steady_s"]
+    ack, ack_mono = w["ack_system_s"], w["ack_steady_s"]
+    source = calendar_s(w, "completion_")
+    s0, m0 = w["terminal_query_before_system_s"], w["terminal_query_before_steady_s"]
+    s1, m1 = w["terminal_query_after_system_s"], w["terminal_query_after_steady_s"]
+    age, tolerance = w["terminal_max_age_s"], w["terminal_host_clock_tolerance_s"]
+    integer(w["terminal_frame"], 255)
+    integer(w["terminal_position_percent"], 100)
+    integer(w["terminal_motion_done"], 1)
+    # Legacy offset-proof slots are reserved zero in v3, never repurposed.
+    if (any(w[key] != 0 for key in CURRENT_FIELDS[11:22])
+            or w["proof_valid"] != 1 or w["terminal_fault"] != 0
+            or w["terminal_generation"] != w["generation"] or w["terminal_reference_m"] != w["raw_reference_m"]
+            or any(w[f"terminal_incarnation_{i}"] != w[f"incarnation_{i}"] for i in range(4))
+            or not w["command_started_system_s"] <= ack <= s0 <= w["terminal_sample_system_s"] <= s1 <= at <= w["sample_system_s"]
+            or not 0 < ack_mono <= m0 <= w["terminal_sample_steady_s"] <= m1 <= mono <= w["sample_steady_s"]
+            or not w["terminal_query_before_controller_s"] < source-.001 < source+.001 < w["terminal_query_after_controller_s"]
+            or source > calendar_s(w) or age != w["current_max_age_s"] or not 0 < age <= max_age_s
+            or tolerance != w["host_clock_tolerance_s"] or at-s0 > age or mono-m0 > age
+            or abs((at-s0)-(mono-m0)) > tolerance or abs((s0-ack)-(m0-ack_mono)) > tolerance
+            or (w["completion_reason"] == 1 and w["terminal_motion_done"] != 1)
+            or (completion and (now-s0 > max_age_s or steady_now-m0 > max_age_s))):
+        raise ContractError("LEARNED_HARDWARE_COMPLETION")
+
+
 def check_hardware(evidence, now, steady_now, max_age_s, *, completion=False, allow_pending=False):
     try:
         hw = evidence["snapshot"]["gripper_controller"]["hardware_execution"]
         if not isinstance(hw, dict) or set(hw) != {"wire", "clock_binding", "received_steady_s"}:
             raise ValueError()
         wire = hw["wire"]
-        if not isinstance(wire, dict) or set(wire) != set(LIVE_FIELDS if wire.get("version") == 2 else FIELDS):
+        if not isinstance(wire, dict) or set(wire) != set(CAUSAL_FIELDS if wire.get("version") == 3 else LIVE_FIELDS if wire.get("version") == 2 else FIELDS):
             raise ValueError()
         for value in wire.values():
             number(value)
-        mapping = validate_clock_binding(hw["clock_binding"])
+        mapping = (validate_temporal_policy if wire.get("version") == 3 else validate_clock_binding)(hw["clock_binding"])
         if not any(identity(wire)) or identity(wire) != mapping["incarnation"]:
             raise ContractError("LEARNED_HARDWARE_INCARNATION")
         for key in ("generation", "active_generation", "completed_generation"):
@@ -162,7 +227,7 @@ def check_hardware(evidence, now, steady_now, max_age_s, *, completion=False, al
         integer(wire["completion_reason"], 2)
         for key in ("pending", "rpc_active", "arm_resumed", "stopped", "valid"):
             integer(wire[key], 1)
-        if wire["version"] not in (1, 2) or wire["valid"] != 1:
+        if wire["version"] not in (1, 2, 3) or wire["valid"] != 1:
             raise ContractError("LEARNED_HARDWARE_INVALID")
         if wire["stopped"] or wire["error"]:
             raise ContractError("LEARNED_HARDWARE_UNRESOLVED")
@@ -175,8 +240,8 @@ def check_hardware(evidence, now, steady_now, max_age_s, *, completion=False, al
         if unresolved and not pending:
             raise ContractError("LEARNED_HARDWARE_UNRESOLVED")
         now, steady_now = number(now), number(steady_now)
-        uncertainty = mapping["uncertainty_s"]
-        if wire["version"] == 2:
+        uncertainty = mapping.get("uncertainty_s", mapping.get("host_clock_tolerance_s"))
+        if wire["version"] >= 2:
             check_current_bracket(wire, now, steady_now, max_age_s)
         elif (not mapping["system_anchor_s"] <= now <= mapping["valid_until_system_s"]
                 or abs((now - mapping["system_anchor_s"]) - (steady_now - mapping["steady_anchor_s"])) > uncertainty):
@@ -191,7 +256,14 @@ def check_hardware(evidence, now, steady_now, max_age_s, *, completion=False, al
                 raise ContractError("LEARNED_HARDWARE_STALE")
         if not 0 <= now - wire["sample_system_s"] <= max_age_s:
             raise ContractError("LEARNED_HARDWARE_STALE")
-        source = calendar_s(wire) + mapping["calendar_to_system_offset_s"]
+        if wire["version"] == 3:
+            if (wire["current_max_age_s"] != mapping["max_age_s"]
+                    or wire["host_clock_tolerance_s"] != mapping["host_clock_tolerance_s"]
+                    or wire["sample_fault"] != 0):
+                raise ContractError("LEARNED_HARDWARE_TEMPORAL_POLICY")
+            integer(wire["sample_motion_done"], 1)
+            integer(wire["sample_position_percent"], 100)
+        source = calendar_s(wire) + mapping.get("calendar_to_system_offset_s", 0.)
         if wire["version"] == 1 and (source + uncertainty > now or now - (source - uncertainty) > max_age_s):
             raise ContractError("LEARNED_HARDWARE_STALE")
         if pending:
@@ -208,6 +280,9 @@ def check_hardware(evidence, now, steady_now, max_age_s, *, completion=False, al
         else:
             if wire["completed_generation"] != generation or wire["completion_reason"] not in (1, 2):
                 raise ContractError("LEARNED_HARDWARE_COMPLETION")
+            if wire["version"] == 3:
+                check_causal_command_proof(wire, now, steady_now, max_age_s, completion=completion)
+                return wire
             if wire["version"] == 2:
                 # Revalidate the original proof at its recorded instant, not now.
                 proof = validate_clock_binding({

@@ -31,9 +31,12 @@ struct ROBOT_STATE_PKG {
 struct Robot {
   int moves=0,resumes=0,target=100,polls=0,move_error=0,resume_error=0,arm_sends=0;
   JointPos last_arm;
+  bool sampler_only=false;
+  std::thread::id sampler_thread;
   bool stale=false,settled=false,clock_mode=false,delayed=false;
   int delay_ms=10;
   int terminal_scenario=0;
+  std::chrono::steady_clock::time_point move_at;
   std::function<void()> initial_hook,move_hook,poll_hook,resume_hook;
   ROBOT_STATE_PKG state;
   void source_now() {
@@ -44,6 +47,7 @@ struct Robot {
       calendar.tm_hour,calendar.tm_min,calendar.tm_sec,int(ms%1000)};
   }
   int GetRobotRealTimeState(ROBOT_STATE_PKG *p) {
+    if(sampler_only) assert(std::this_thread::get_id()==sampler_thread);
     if (!moves) { if(clock_mode)source_now();if(initial_hook){auto f=std::move(initial_hook);initial_hook=nullptr;f();} }
     else {
       ++polls; state.gripper_position=target+(settled?1:0);state.gripper_motiondone=settled?0:1;
@@ -53,14 +57,14 @@ struct Robot {
     if(!moves && terminal_scenario==4) state.gripper_position=99;
     if(moves && terminal_scenario) {
       if(terminal_scenario==1 || terminal_scenario==2) state.gripper_position=100;
-      if(terminal_scenario==2) state.gripper_motiondone=polls<3?0:1;
+      if(terminal_scenario==2) state.gripper_motiondone=(clock_mode ? std::chrono::steady_clock::now()-move_at<std::chrono::milliseconds(40) : polls<3)?0:1;
       if(terminal_scenario==4) {state.gripper_position=99;state.gripper_motiondone=1;}
       if(terminal_scenario==3) {state.gripper_position=80;state.gripper_motiondone=1;}
     }
     *p=state;return 0;
   }
   int MoveGripper(int,int pos,int,int,int,int,int,int,int,int) {
-    ++moves;target=pos;if(move_hook)move_hook();
+    ++moves;move_at=std::chrono::steady_clock::now();target=pos;if(move_hook)move_hook();
     if(clock_mode)std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
     return move_error;
   }
@@ -72,7 +76,14 @@ template<class F> Result send_udp_command_and_observe(F f){return {f(),0,true};}
 struct Parameter {std::vector<double> values;std::vector<double> as_double_array()const{return values;}};
 struct Node {Parameter parameter;Parameter get_parameter(const char *)const{return parameter;}};
 struct PreciseControllerClock {
-  double read(long, const std::function<bool()> &cancel) {
+  std::atomic<int> delay_ms{0};
+  double read(long timeout, const std::function<bool()> &cancel) {
+    auto start=std::chrono::steady_clock::now();
+    while(std::chrono::steady_clock::now()-start<std::chrono::milliseconds(delay_ms)) {
+      if(cancel()) throw std::runtime_error("cancelled");
+      if(std::chrono::steady_clock::now()-start>=std::chrono::milliseconds(timeout)) throw std::runtime_error("timeout");
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
     if(cancel()) throw std::runtime_error("cancelled");
     return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
   }
@@ -103,9 +114,12 @@ struct FairinoHardwareInterface {
   GripperSourceClock _gripper_source_clock;
   std::unique_ptr<PreciseControllerClock> _precise_clock;
   std::array<double,35> _gripper_raw_sample{};
-  std::array<double,67> _gripper_current_sample{};
+  std::array<double,92> _gripper_current_sample{};
+  ROBOT_STATE_PKG _gripper_raw_state{}, _gripper_current_state{};
   double _last_controller_clock=0.;
-  bool refresh_gripper_freshness();
+  std::vector<double> _gripper_temporal_policy;
+  bool refresh_gripper_freshness(double after_steady=0.);
+  bool certified_gripper_observation(ROBOT_STATE_PKG &, std::array<double,92> &, double);
   std::shared_ptr<Node> node=std::make_shared<Node>();
   auto get_node(){return node;}
   std::array<double,GripperExecutionEvidence::names.size()> _gripper_evidence_values{};

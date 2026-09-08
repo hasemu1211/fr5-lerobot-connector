@@ -9,12 +9,24 @@ import unittest
 
 from tools.fr5_data_factory import ContractError
 from tools.data_factory.rollout.gripper_evidence import (
-    LIVE_FIELDS, RESOURCE, check_hardware, decode_dynamic_state, native_clock_parameter,
+    LIVE_FIELDS, CAUSAL_FIELDS, RESOURCE, check_hardware, decode_dynamic_state, native_clock_parameter, native_temporal_parameter,
 )
 from tests.data_factory.rollout.test_gripper_evidence import patched_source, method
 
 
+def temporal_policy(*, incarnation=(1, 2, 3, 4), max_age_s=.08, host_clock_tolerance_s=.002):
+    """CPU fixture; deployed values must come from the existing approved limits."""
+    return {"schema_version": "fr5.gripper_temporal_policy.v1", "incarnation": list(incarnation),
+            "max_age_s": max_age_s, "host_clock_tolerance_s": host_clock_tolerance_s}
+
+
 class CurrentBracketTest(unittest.TestCase):
+    def test_mapping_expiry_falsifiers(self):
+        for mode, moves, completed in (("expiry_first", 1, 1), ("expiry_second", 2, 2), ("expiry_during", 1, 1)):
+            packet, _ = self.packet(mode)
+            self.assertEqual(packet, {"moves": moves, "completed": completed, "error": 0})
+            print(mode, packet, flush=True)
+
     @classmethod
     def setUpClass(cls):
         from control_msgs.msg import DynamicJointState, InterfaceValue
@@ -26,7 +38,7 @@ class CurrentBracketTest(unittest.TestCase):
             "fairino_hardware_v3_9_7/include/fairino_hardware/gripper_execution_evidence.hpp"))
         source = patched_source("fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp")
         native = "\n".join(method(source, name) for name in (
-            "refresh_gripper_freshness", "gripper_worker", "sample_gripper_evidence",
+            "certified_gripper_observation", "refresh_gripper_freshness", "gripper_worker", "sample_gripper_evidence",
             "gripper_release_ready", "write", "stop_gripper_worker"))
         fixture = Path(__file__).with_name("gripper_native_fixture.cpp").read_text().split("int main(")[0]
         code = fixture.replace("// NATIVE_METHODS", native) + Path(__file__).with_name("bracket_native_main.cpp").read_text()
@@ -35,14 +47,11 @@ class CurrentBracketTest(unittest.TestCase):
         subprocess.run(["g++", "-std=c++17", "-pthread", str(root / "native.cpp"), "-o", str(cls.binary)], check=True, capture_output=True)
 
     def packet(self, mode="fresh"):
-        now, steady = time.time(), time.monotonic()
-        binding = {"schema_version": "fr5.gripper_source_clock.v1", "incarnation": [1,2,3,4],
-                   "calendar_to_system_offset_s": 0., "uncertainty_s": .002,
-                   "system_anchor_s": now, "steady_anchor_s": steady, "valid_until_system_s": now+.25}
-        result = subprocess.run([str(self.binary), mode, ",".join(map(repr, native_clock_parameter(binding, .08)))],
+        policy = temporal_policy()
+        result = subprocess.run([str(self.binary), mode, ",".join(map(repr, native_temporal_parameter(policy)))],
                                 capture_output=True, text=True, timeout=3)
         self.assertEqual(result.returncode, 0, result.stderr)
-        return json.loads(result.stdout), binding
+        return json.loads(result.stdout), policy
 
     def evidence(self, packet, binding):
         from control_msgs.msg import DynamicJointState, InterfaceValue
@@ -55,18 +64,87 @@ class CurrentBracketTest(unittest.TestCase):
 
     def test_completed_proof_survives_new_current_brackets_and_old_expiry(self):
         packet, binding = self.packet()
-        self.assertEqual(tuple(packet["names"]), LIVE_FIELDS)
+        self.assertEqual(tuple(packet["names"]), CAUSAL_FIELDS)
         self.assertTrue(packet["proof_unchanged"])
         self.assertGreater(packet["renewed_arm_sends"], 0)
         evidence = self.evidence(packet, binding)
-        self.assertGreater(evidence["captured_at_s"], binding["valid_until_system_s"])
+        self.assertGreater(evidence["captured_at_s"] - packet["wire"][44], .15)
         wire = check_hardware(evidence, evidence["captured_at_s"], evidence["captured_monotonic_s"], .08)
         self.assertEqual(wire["completed_generation"], 1)
 
     def test_native_missing_expired_wrong_sample_reset_and_stop_block(self):
-        for mode in ("expired", "wrong_sample", "absent", "reset", "old_generation", "incomplete", "regressed", "stopped"):
+        for mode in ("expired", "wrong_sample", "absent", "reset", "old_generation", "incomplete", "regressed", "stopped", "pre_ack", "terminal_wrong_generation", "terminal_wrong_reference",
+                     "terminal_wrong_incarnation", "terminal_stale", "terminal_tie", "terminal_fault", "terminal_wrong_done"):
             with self.subTest(mode=mode):
                 self.packet(mode)
+
+    def test_actual_causal_command_activity_and_faults(self):
+        for mode in ("command_old_done", "command_changed_old_done", "command_stale", "command_stop", "command_error",
+                     "command_policy_change", "command_late_resume", "command_cancel_query", "command_99", "command_busy_done", "command_settled"):
+            with self.subTest(mode=mode):
+                packet, _ = self.packet(mode)
+                success = mode in ("command_99", "command_busy_done", "command_settled")
+                self.assertEqual(packet["completed"], int(success))
+                self.assertEqual(packet["moves"], 0 if mode=="command_policy_change" else 1)
+                if success:
+                    self.assertEqual(packet["error"], 0)
+
+    def test_python_causal_terminal_proof_and_archive_separation(self):
+        from tools.data_factory.rollout.gripper_evidence import calendar_s
+        packet, policy = self.packet()
+        evidence = self.evidence(packet, policy)
+        w = evidence["snapshot"]["gripper_controller"]["hardware_execution"]["wire"]
+        changes = ({"ack_steady_s": w["terminal_query_before_steady_s"]+.001},
+                   {"terminal_generation": 2}, {"terminal_reference_m": .1}, {"terminal_incarnation_0": 9},
+                   {"terminal_query_before_steady_s": w["terminal_query_before_steady_s"]-1},
+                   {"terminal_query_before_controller_s": calendar_s(w,"completion_")-.001},
+                   {"terminal_motion_done": 0}, {"terminal_fault": 1}, {"proof_valid":0},
+                   {"proof_clock_version": 1}, {"terminal_max_age_s": 99})
+        for change in changes:
+            candidate = copy.deepcopy(evidence)
+            candidate["snapshot"]["gripper_controller"]["hardware_execution"]["wire"].update(change)
+            with self.subTest(change=change), self.assertRaises(ContractError):
+                check_hardware(candidate, evidence["captured_at_s"], evidence["captured_monotonic_s"], .08)
+        # Historical terminal remains readable; it cannot be handed off as newly complete.
+        with self.assertRaises(ContractError):
+            check_hardware(evidence, evidence["captured_at_s"], evidence["captured_monotonic_s"], .08, completion=True)
+        # A v3 policy cannot promote old v2 evidence to the new live contract.
+        old = copy.deepcopy(evidence)
+        old["snapshot"]["gripper_controller"]["hardware_execution"]["wire"] = {k:w[k] for k in LIVE_FIELDS}
+        old["snapshot"]["gripper_controller"]["hardware_execution"]["wire"]["version"] = 2
+        with self.assertRaises(ContractError):
+            check_hardware(old, evidence["captured_at_s"], evidence["captured_monotonic_s"], .08)
+
+    def test_archived_v2_mapping_proof_still_reads_after_expiry(self):
+        packet, policy = self.packet()
+        evidence = self.evidence(packet, policy)
+        hw = evidence["snapshot"]["gripper_controller"]["hardware_execution"]
+        w = {k: hw["wire"][k] for k in LIVE_FIELDS}
+        w["version"] = 2
+        at, mono = w["proof_system_s"], w["proof_steady_s"]
+        binding = {"schema_version":"fr5.gripper_source_clock.v1", "incarnation":[1,2,3,4],
+                   "calendar_to_system_offset_s":0., "uncertainty_s":.002,
+                   "system_anchor_s":at-.1, "steady_anchor_s":mono-.1, "valid_until_system_s":at+.05}
+        values = native_clock_parameter(binding, .08)
+        for key, value in zip(LIVE_FIELDS[46:57], values):
+            w[key] = value
+        hw.update(wire=w, clock_binding=binding)
+        self.assertGreater(evidence["captured_at_s"], binding["valid_until_system_s"])
+        self.assertEqual(check_hardware(evidence, evidence["captured_at_s"], evidence["captured_monotonic_s"], .08)["version"], 2)
+
+    def test_bootstrap_identity_decode_does_not_grant_readiness(self):
+        from tools.data_factory.rollout.gripper_evidence import FIELDS, identity
+        packet, policy = self.packet()
+        for names, version in ((FIELDS, 1), (CAUSAL_FIELDS, 3)):
+            startup = {"names": list(names), "wire": packet["wire"][:len(names)]}
+            startup["wire"][0] = version
+            startup["wire"][27] = 0
+            if version == 3:
+                startup["wire"][35] = 0
+            evidence = self.evidence(startup, policy)
+            self.assertEqual(identity(evidence["snapshot"]["gripper_controller"]["hardware_execution"]["wire"]), [1,2,3,4])
+            with self.assertRaises(ContractError):
+                check_hardware(evidence, evidence["captured_at_s"], evidence["captured_monotonic_s"], .08)
 
     def test_python_rejects_relabel_and_incomplete_proof(self):
         packet, binding = self.packet()

@@ -854,7 +854,7 @@ This ordering adds no Scene store, execution owner or task-success authority.
 ### Requirement: Current source freshness is independent of retained command completion
 
 The existing `require_gripper_source_clock=true` deployment opt-in SHALL select
-native evidence version 2. Its existing gripper worker SHALL bracket an exact
+native evidence version 3. Its existing gripper worker SHALL bracket an exact
 native sampled frame with two precise read-only controller-clock queries outside
 real-time read/write and gripper mutex ownership. The source calendar interval,
 including millisecond encoding ambiguity, SHALL be strictly enclosed by those
@@ -868,31 +868,63 @@ its hardware lifecycle. Query failure, clock regression, an expired certificate,
 read failure, stop/error or changed incarnation/generation SHALL prevent further
 arm transmission. A current certificate SHALL NOT establish command completion.
 
-Once the original command-clock and completion checks establish a terminal
-record, its original calibration and validation instant SHALL remain historical
-proof for that generation. Later current certificates SHALL NOT renew that
-command clock, reinterpret its completion time, repair an expired incomplete
-command or change frozen inference/plan provenance. New live learned inputs
-SHALL require version 2; archived version 1 evidence SHALL retain its original
-reader and validation semantics, without automatic promotion to live evidence.
+Live command evidence SHALL use the exact certified native state, including
+position, motion-done and fault fields, rather than a separate cached-state read.
+After a successful non-blocking MoveGripper return, the sole worker SHALL record
+paired host acknowledgement anchors. Eligible command samples SHALL be strictly
+enclosed by queries whose first HOST start is no earlier than that acknowledgement.
+This establishes post-return sample timing, not a device command-ID acknowledgement,
+queue flush, grasp success or whole-task success.
 
-Only the existing LIVE preparation owner MAY set and read back the exact existing
-hardware-node clock parameter using its selected age budget and matching native
-incarnation. Plan-only SHALL only observe. Missing/mismatched native version,
-incarnation or parameter readback SHALL block live consumption.
+The original command deadline, advancing-source and activity/target predicates
+SHALL remain enforced. The terminal decision SHALL freeze its own exact
+calendar/frame/read anchors, query bracket, raw status, reference, generation,
+incarnation and validation instant. That terminal bracket SHALL satisfy the same
+age bound before servo restart and final completion commitment. A renewed CURRENT
+certificate SHALL NOT replace terminal proof, revive an incomplete/expired command
+or change frozen inference, plan or trace provenance. Native release and Python
+consumers SHALL validate historical proof at its recorded instant; an immediate
+completion handoff SHALL additionally reject an aged terminal bracket.
 
-The finite original command-calibration horizon remains required and is not
-qualified by retrospective current-source brackets. Controller-clock domain,
-reset behavior, native query/sampling latency and device-level command/telemetry
-causality require root-owned deployment evidence; CPU replay is not physical
-qualification. No post-command controller barrier or future-output authority is
-introduced by this requirement.
+The existing LIVE preparation owner SHALL explicitly select version 3 and set/read
+back `gripper_temporal_policy_v1` on the existing hardware node. Its seven numeric
+values SHALL be `[1, incarnation_0, incarnation_1, incarnation_2, incarnation_3,
+max_age_s, host_clock_tolerance_s]`, from `fr5.gripper_temporal_policy.v1`.
+The native worker SHALL pin the policy for its activation; changes require a new
+activation and incarnation. This policy SHALL NOT contain an offset, inferred rate
+or expiry horizon and SHALL NOT expand the selected age or host-clock tolerance.
+Plan-only SHALL only observe. Missing/mismatched policy, native version,
+incarnation or parameter readback SHALL block live consumption. Bootstrap and
+normal caller integration require their own verification; the native wire and
+reader alone SHALL NOT be reported as a qualified live path.
 
-#### Scenario: Completed command outlives its original calibration
+Archived version 1 and 2 evidence SHALL retain its original mapping/proof reader
+semantics without automatic promotion to live evidence. A newly approved live
+plan SHALL explicitly identify its temporal policy and wire version; existing
+approved plans and stored artifacts SHALL NOT be rewritten for compatibility.
 
-- **WHEN** the original checks established completion and a new exact current sample is certified after that calibration expires
-- **THEN** matching-generation arm readiness may use the new current certificate and unchanged historical terminal proof
-- **AND** absent, expired, wrong-sample or regressed current evidence prevents arm transmission
+Controller clock/status-domain continuity, reset detection, busy-controller
+query latency and device queue attribution remain root-owned physical
+qualification. The precise read-only RPC and CPU tests SHALL NOT be interpreted
+as proof of those properties or permission for physical execution.
+
+#### Scenario: Initial and subsequent commands outlive an old offset mapping
+
+- **WHEN** idle or approval delay exceeds a historical offset mapping, or its horizon would expire during a command
+- **THEN** a new version 3 command may establish completion using fresh exact post-acknowledgement certified samples under the unchanged live policy
+- **AND** no offset horizon is extended and no stale/incomplete command is repaired
+
+#### Scenario: Completed proof remains historical during current renewal
+
+- **WHEN** current evidence is renewed after a causal terminal record was established
+- **THEN** the terminal tuple, acknowledgement and proof instant remain unchanged
+- **AND** stale current evidence, changed generation/incarnation, fault, stop or regression blocks arm transmission
+
+#### Scenario: A different or pre-acknowledgement frame is offered as completion
+
+- **WHEN** a sample differs from the certified native state, precedes the acknowledgement query, touches a quantization boundary or expires before commitment
+- **THEN** it cannot establish completion or release the arm
+- **AND** cancellation and the original command deadline remain bounded through the existing worker
 
 #### Scenario: A current frame contains an old off-target done flag
 

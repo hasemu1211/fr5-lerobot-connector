@@ -56,7 +56,7 @@ class NativeGripperEvidenceTest(unittest.TestCase):
         header = patched_source("fairino_hardware_v3_9_7/include/fairino_hardware/gripper_execution_evidence.hpp")
         (path / "gripper_execution_evidence.hpp").write_text(header)
         source = patched_source("fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp")
-        native = (method(source, "refresh_gripper_freshness") + method(source, "gripper_worker") + method(source, "sample_gripper_evidence")
+        native = (method(source, "certified_gripper_observation") + method(source, "refresh_gripper_freshness") + method(source, "gripper_worker") + method(source, "sample_gripper_evidence")
                   + method(source, "gripper_release_ready") + method(source, "write") + method(source, "stop_gripper_worker"))
         fixture = Path(__file__).with_name("gripper_native_fixture.cpp").read_text()
         (path / "native.cpp").write_text(fixture.replace("// NATIVE_METHODS", native))
@@ -132,7 +132,7 @@ class NativeGripperEvidenceTest(unittest.TestCase):
         fixture = Path(__file__).with_name("gripper_native_fixture.cpp").read_text().split("int main(")[0]
         source = patched_source("fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp")
         native = "\n".join(method(source, name) for name in (
-            "refresh_gripper_freshness", "gripper_worker", "sample_gripper_evidence",
+            "certified_gripper_observation", "refresh_gripper_freshness", "gripper_worker", "sample_gripper_evidence",
             "gripper_release_ready", "write", "stop_gripper_worker"))
         main = r'''int main(int argc,char **argv) {
           using namespace fairino_hardware;
