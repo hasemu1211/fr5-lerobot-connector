@@ -454,6 +454,8 @@ class NativePolicyTest(unittest.TestCase):
         torch.testing.assert_close(seen["camera2"], torch.tensor([[[[0.]], [[0.]], [[1.]]]]))
 
     def test_launch_manifests_must_survive_model_construction_unchanged(self):
+        from lerobot.policies.factory import make_pre_post_processors
+
         for filename in ('fr5_training_split.json', 'fr5_training_receipt.json'):
             path = self.root / filename
             for change in ('remove', 'replace'):
@@ -464,27 +466,33 @@ class NativePolicyTest(unittest.TestCase):
                             path.unlink()
                         else:
                             path.write_text('{"changed":true}')
-                        return object(), object(), object()
+                        return object(), *make_pre_post_processors(SimpleNamespace(), pretrained_path=str(self.policy_dir))
                     with mock.patch.object(NativeSmolVLA, '_load_components', side_effect=load):
                         with self.assertRaisesRegex(ContractError, 'LEARNED_CHECKPOINT_CHANGED'):
                             NativeSmolVLA.load(self.policy_dir)
                     path.write_text('{}')
 
     def test_pending_launch_manifests_remain_supported(self):
+        from lerobot.policies.factory import make_pre_post_processors
+
         for filename in ('fr5_training_split.json', 'fr5_training_receipt.json'):
             pending = Path(str(self.root) + '.' + filename + '.pending')
             self.addCleanup(pending.unlink, missing_ok=True)
             (self.root / filename).rename(pending)
-        with mock.patch.object(NativeSmolVLA, '_load_components', return_value=(object(), object(), object())):
+        processors = make_pre_post_processors(SimpleNamespace(), pretrained_path=str(self.policy_dir))
+        with mock.patch.object(NativeSmolVLA, '_load_components', return_value=(object(), *processors)):
             native = NativeSmolVLA.load(self.policy_dir)
         self.assertEqual(native.observation_view['representation'], 'raw')
 
     def test_launch_manifest_change_during_saved_view_validation_is_rejected(self):
+        from lerobot.policies.factory import make_pre_post_processors
+
         def validate(*args):
             (self.root / 'fr5_training_split.json').write_text('{"changed":true}')
             return {"representation": "raw"}
         self.saved_view.side_effect = validate
-        with mock.patch.object(NativeSmolVLA, '_load_components', return_value=(object(), object(), object())):
+        processors = make_pre_post_processors(SimpleNamespace(), pretrained_path=str(self.policy_dir))
+        with mock.patch.object(NativeSmolVLA, '_load_components', return_value=(object(), *processors)):
             with self.assertRaisesRegex(ContractError, 'LEARNED_CHECKPOINT_CHANGED'):
                 NativeSmolVLA.load(self.policy_dir)
 
