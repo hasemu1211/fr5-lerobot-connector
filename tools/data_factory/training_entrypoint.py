@@ -303,6 +303,21 @@ def launch(*, dataset: Path, repo_id: str, inventory: Path, profile: str,
             # receipt as interruption evidence; a retry must not start again.
 
 
+def continue_training(checkpoint: Path, *, output: Path, inventory: Path, steps: int,
+                      batch_size: int, eval_steps: int, save_freq: int, schedule: str,
+                      dry_run: bool = False) -> int:
+    from tools.validate_training_checkpoint import validate_checkpoint, continuation_argv
+
+    parent, source_output = validate_checkpoint(checkpoint)
+    receipt = load_json_strict(source_output / "fr5_training_receipt.json")
+    split = load_json_strict(source_output / "fr5_training_split.json")
+    argv = continuation_argv(parent, receipt, output=output.expanduser().resolve(), steps=steps,
+                             batch_size=batch_size, eval_steps=eval_steps, save_freq=save_freq, schedule=schedule)
+    return launch(dataset=Path(split["dataset_identity"]["dataset_root"]), repo_id=split["repo_id"],
+                  inventory=inventory, profile=split["feature_contract"]["profile"],
+                  collection_profile=split["feature_contract"]["collection_profile_id"], argv=argv, dry_run=dry_run)
+
+
 def _latest_checkpoint(output: Path) -> Path | None:
     candidates = sorted(output.glob("checkpoints/*/pretrained_model"))
     return candidates[-1] if candidates else None
@@ -583,7 +598,26 @@ def _run_native_training(argv: list[str], split: dict, receipt: dict) -> int:
         lerobot_train.make_train_eval_datasets = admitted_datasets
         if "initialization" in receipt:
             lerobot_train.make_policy = admitted_policy
-        lerobot_train.main()
+        if receipt.get("initialization", {}).get("mode") == "continuation":
+            from tools.data_factory.training_continuation import native_continuation
+            from tools.validate_training_checkpoint import continuation_checkpoint_state
+
+            initial = receipt["initialization"]
+            same_run = native_options.get("--resume") == "true"
+            source = (Path(native_options["--config_path"]).parent if same_run
+                      else Path(initial["checkpoint"]))
+            source_output = source.parent.parent.parent
+            source_receipt = load_json_strict(source_output / "fr5_training_receipt.json")
+            state = continuation_checkpoint_state(source, source_receipt)
+            config = options(receipt["normalized_argv"][1:])
+            sys.argv = [argv[0], "--resume=true", f"--config_path={source / 'train_config.json'}",
+                        *[f"{key}={config[key]}" for key in
+                          ("--output_dir", "--steps", "--batch_size", "--eval_steps", "--save_freq")]]
+            with native_continuation(lerobot_train, checkpoint=source.parent, state=state,
+                                     schedule=initial["schedule"], batch_size=int(config["--batch_size"])):
+                lerobot_train.main()
+        else:
+            lerobot_train.main()
         return 0
     finally:
         lerobot_train.make_train_eval_datasets = original_factory
@@ -1106,6 +1140,16 @@ def main() -> None:
     union.add_argument("--output", type=Path, required=True)
     resume = sub.add_parser("resume", help="Resume an admitted checkpoint with its TRAIN normalization")
     resume.add_argument("--checkpoint", type=Path, required=True)
+    continuation = sub.add_parser("continue", help="Continue native state into a new admitted output")
+    continuation.add_argument("--checkpoint", type=Path, required=True)
+    continuation.add_argument("--output", type=Path, required=True)
+    continuation.add_argument("--approved-inventory", type=Path, required=True)
+    continuation.add_argument("--steps", type=int, required=True, help="Absolute ending step, not additional updates")
+    continuation.add_argument("--batch-size", type=int, required=True)
+    continuation.add_argument("--eval-steps", type=int, required=True)
+    continuation.add_argument("--save-freq", type=int, required=True)
+    continuation.add_argument("--continuation-schedule", choices=("preserve", "hold"), required=True)
+    continuation.add_argument("--dry-run", action="store_true")
     human = sub.add_parser("approve", help="Preview a frozen revision; issue approval only through a controlling human TTY",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''Request JSON (paths reference existing evidence; no consent field):
@@ -1186,6 +1230,10 @@ for a new reviewed attempt. This command never starts training or robot executio
             print(json.dumps(value, indent=2, sort_keys=True))
         elif args.mode == "resume":
             raise SystemExit(resume_training(args.checkpoint))
+        elif args.mode == "continue":
+            raise SystemExit(continue_training(args.checkpoint, output=args.output, inventory=args.approved_inventory,
+                steps=args.steps, batch_size=args.batch_size, eval_steps=args.eval_steps, save_freq=args.save_freq,
+                schedule=args.continuation_schedule, dry_run=args.dry_run))
         elif args.mode == "approve":
             print(json.dumps(approve(load_json_strict(args.request), args.output_dir.resolve(), args.approved_by, dry_run=args.dry_run), indent=2, sort_keys=True))
         elif args.mode == "delegate":

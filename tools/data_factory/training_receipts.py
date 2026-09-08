@@ -284,7 +284,16 @@ def compile_launch_receipt(split: Mapping, argv: list[str], inventory_path: str)
     }
     source = options(argv[1:]).get("--policy.path")
     base = options(split["feature_contract"]["policy_argv"]).get("--policy.path")
-    if source != base:
+    continuation = options(argv[1:]).get("--fr5.continue_from")
+    if continuation is not None:
+        from tools.validate_training_checkpoint import continuation_binding
+
+        if source != continuation or split["feature_contract"]["profile"] != "smolvla":
+            raise ReceiptError("TRAINING_CONTINUATION_PROFILE")
+        value["initialization"] = continuation_binding(Path(continuation), split, value["normalization"], argv)
+    elif "--fr5.continuation_schedule" in options(argv[1:]):
+        raise ReceiptError("TRAINING_CONTINUATION_PARENT")
+    elif source != base:
         from tools.validate_training_checkpoint import warm_start_binding
 
         if split["feature_contract"]["profile"] != "smolvla" or not source:

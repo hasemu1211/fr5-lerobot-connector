@@ -136,6 +136,16 @@ The lane SHALL choose the next safe valuable outcome using code/tests, current a
 - **AND** resumed iterator construction preserves the declared policy RNG sequence; tests compare uninterrupted and repeated-resume optimizer, scheduler, RNG and sample traces through an epoch boundary
 - **AND** CPU fixture equivalence alone does not establish real policy continuation; the native admitted trainer, saved checkpoint and independent reload must verify the supported runtime scope.
 
+#### Scenario: A new output extends an immutable native parent
+- **WHEN** the consumer selects `--continue-from` with a new output and current approved inventory
+- **THEN** existing launch admission binds the complete immutable parent, receipt, unchanged dataset/partition/features/TRAIN normalization and inherited recipe, with no optimizer, scheduler, RNG, sample-stream or step reset
+- **AND** only absolute ending step, batch size, save/evaluation cadence and the declared schedule-tail choice may change; a changed recipe, overlapping output or incomplete history fails closed
+- **AND** `preserve` rebuilds the original native horizon and retains its inherited future, while `hold` appends the parent's current LR as a constant tail without changing the prefix through the parent step; subsequent resumes inherit the original horizon and any existing hold boundary
+- **AND** each child saves a committed cursor and schedule descriptor beside native optimizer/scheduler/RNG state, including Python and NumPy Gaussian caches; missing or inconsistent state is rejected
+- **AND** reconstruction from a legacy checkpoint is limited to unresumed, constant-batch, single-process history and its actually serialized RNG; omitted historical Gaussian caches cannot be recovered or represented as uninterrupted legacy equivalence
+- **AND** the supported extension is native SmolVLA with one process, zero workers, deterministic transforms, no AMP/compilation/streaming/weighted sampling or dropped frames; runtime checks reject unsupported accumulation or skipped updates
+- **AND** changing native evaluation cadence explicitly changes future RNG consumption; interrupted/uninterrupted equivalence comparisons use matching evaluation cadence.
+
 #### Scenario: Approval or GPU ownership is unavailable
 - **WHEN** gated execution cannot proceed
 - **THEN** the lane reports the exact blocker to root and continues independent scoped software, metadata or research work

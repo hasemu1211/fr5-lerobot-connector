@@ -86,7 +86,18 @@ FR5_REPO_ID="$REPO_ID" direnv exec . scripts/train_policy.sh \
 
 SmolVLA의 기존 launch 명령에 `--warm-start-from "$PARENT_CHECKPOINT"`를 dataset 이름 앞에 추가하면 검증된 로컬 checkpoint 가중치에서 새 학습을 시작한다. 새 output과 현재 유효한 승인·위임이 필요하며, 부모의 dataset·선택·TRAIN/held-out 분할·feature·TRAIN 정규화가 자식과 같아야 한다. 위임 예산 변경으로 inventory와 split digest가 달라도 나머지 partition 내용은 정확히 비교한다. 부모 checkpoint 전체와 receipt identity 및 optimizer·scheduler·RNG·sample stream·step의 reset 의미가 자식 receipt의 `initialization`에 연결된다. 부모 output 안에 자식을 쓰거나 원본 checkpoint를 수정하지 않는다. 입력이 바뀌면 발행 전 및 native dataset 구성 시 다시 거부한다.
 
-Warm-start는 가중치를 이어받지만 optimizer 상태를 이어받는 resume은 아니다. `--resume-from`은 기존 저장 horizon 안에서 같은 run의 optimizer·scheduler·RNG를 복원하는 별도 단독 모드다. 완료된 horizon을 늘리거나 batch를 바꾸는 true continuation은 현재 지원하지 않는다. 이 경우 scheduler 재구성에 따른 LR 변화와 batch 이력에 따른 누적 sample 위치를 명시적으로 처리해야 하며, 짧은 warm-start 처리량 실험을 그 문제의 해결 또는 학습 품질 비교로 표시하지 않는다.
+Warm-start는 가중치를 이어받지만 optimizer 상태를 이어받는 resume은 아니다. `--resume-from`은 기존 저장 horizon 안에서 같은 run의 optimizer·scheduler·RNG를 복원하는 별도 단독 모드다. 새 output에서 horizon을 늘리거나 batch를 바꾸려면 아래 continuation 모드를 사용한다. 기존 resume이나 짧은 warm-start 처리량 실험을 누적 sample/RNG 연속성의 증거로 표시하지 않는다.
+
+```bash
+scripts/train_policy.sh --continue-from "$PARENT_CHECKPOINT" \
+  --output "$NEW_OUTPUT" --approved-inventory "$APPROVED_INVENTORY" \
+  --steps 24000 --batch-size 4 --eval-steps 8000 --save-freq 4000 \
+  --continuation-schedule hold --dry-run
+```
+
+`--steps`는 추가 update 수가 아닌 **절대 종료 step**이다. `preserve`는 부모의 원래 native scheduler horizon과 이후 LR을 보존한다. `hold`는 부모 step까지의 LR을 유지하고 그 시점 LR로 이후 구간을 고정한다. 이는 명시적인 미래 schedule 변경이며 rewarm이나 optimizer reset이 아니다. 이미 hold한 자식의 `preserve`도 기존 hold를 계승한다. 그 밖의 recipe·dataset·분할·TRAIN 정규화는 부모에게서 상속하며 현재 승인과 새 output을 기존 admission 경계에서 검증한다. dry-run은 학습 output을 만들지 않는다.
+
+지원 범위는 native SmolVLA, single process, workers0, deterministic transforms, no AMP/compile/streaming/weighted sampling이다. native optimizer·scheduler·RNG 파일과 함께 `training_state/fr5_continuation_state.json`에 optimizer가 실제 소비한 epoch·offset·누적 sample 수, 원래 horizon·hold 경계, Gaussian RNG cache를 저장한다. 두 번째 resume도 최신 batch와 절대 step의 곱으로 과거 노출량을 다시 계산하지 않는다. 이전 legacy resume으로 누적 이력을 잃은 부모는 거부하며, legacy 파일이 누락한 과거 Gaussian cache는 복구했다고 주장하지 않는다. 평가 cadence를 바꾸면 이후 RNG 소비도 달라지므로 동등성 비교에서는 cadence를 고정한다. CPU-small native 반복 resume과 admission 검증은 완료했으며 실제 policy의 GPU continuation 및 독립 reload 검증은 root 실행 단계에 남아 있다.
 
 wrapper는 공식 LeRobot trainer의 parser·optimizer·checkpoint 저장을 사용한다. 설치된 0.6.1은 episode를 나누어도 전역 `meta/stats.json`을 유지하므로, connector는 같은 process의 dataset factory에 좁은 adapter를 적용한다. 실제 train/eval index가 승인 split과 같은지 검사한 뒤 **train episode의 기존 metadata 통계만** 합산해 policy와 processor에 전달한다. dataset이나 설치 패키지를 수정하지 않는다. state/action은 count로 가중한 mean·variance와 min/max를 사용하고, 영상 통계는 기존 `dataset.use_imagenet_stats` 설정에 따라 ImageNet 상수 또는 train episode 통계를 사용한다. 학습용 frame/video 재검사는 이 합산의 일부가 아니다.
 

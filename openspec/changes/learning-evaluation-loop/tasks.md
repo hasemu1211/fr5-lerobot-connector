@@ -19,7 +19,9 @@
 
 - [x] Make a same-parent, matched-exposure lower-peak adaptation comparison executable through the existing native warm-start path; verify policy CLI precedence and the built schedule, and hand off checkpoint/evaluation, resource and stop/extend criteria without issuing training authority.
 
-- [ ] Support genuine new-output native continuation with immutable parent state, explicit schedule-prefix meaning and cumulative sample position verified through a second resume; preserve legacy resume and explicit warm-start reset behavior.
+- [x] Implement new-output continuation through native state restoration and existing admission, with immutable parents, explicit schedule prefix and committed sample position verified through repeated CPU-small native resumes; preserve legacy resume and explicit warm-start resets.
+- [ ] Root qualifies the admitted real-policy continuation, saved checkpoint and independent reload under the supported runtime scope before treating the longer curve as native policy evidence.
+- [x] Make a resource-based longer development curve executable with a declared schedule intervention, checkpoint cadence, evaluation comparability and stop/extension criteria; retain historical comparisons and distinguish numerical solver evidence from learning quality.
 
 - [x] Qualify larger-batch native throughput from an immutable learned checkpoint using an explicitly labelled warm-start fork; retain reset semantics and parent/child reload lineage without claiming exact continuation or superior learning from extra exposure.
 

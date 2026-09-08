@@ -23,6 +23,150 @@ REQUIRED_TRAINING_STATE = (
 
 _WARM_START_ANCESTORS = ContextVar("warm_start_ancestors", default=())
 
+CONTINUATION_STATE = "fr5_continuation_state.json"
+
+
+def advance_sample_cursor(cursor: dict, updates: int, batch_size: int) -> dict:
+    """Committed map-style samples, including an uneven final batch; world size one."""
+    import math
+
+    size, offset, epoch = cursor["num_frames"], cursor["offset"], cursor["epoch"]
+    if (any(type(v) is not int for v in (size, offset, epoch, updates, batch_size))
+            or size < 1 or not 0 <= offset < size or min(epoch, updates) < 0 or batch_size < 1):
+        raise ValueError("invalid continuation sample cursor")
+    first = math.ceil((size - offset) / batch_size)
+    if updates < first:
+        offset += updates * batch_size
+    else:
+        epochs, remainder = divmod(updates - first, math.ceil(size / batch_size))
+        epoch += 1 + epochs
+        offset = remainder * batch_size
+    return {"num_frames": size, "epoch": epoch, "offset": offset,
+            "samples_consumed": epoch * size + offset}
+
+
+def continuation_checkpoint_state(policy: Path, receipt: dict) -> dict:
+    """Read committed state, or reconstruct only an unresumed native legacy stream."""
+    from tools.fr5_data_factory import load_json_strict
+
+    saved = load_json_strict(policy / "train_config.json")
+    native = load_json_strict(policy.parent / "training_state/training_step.json")
+    step, batch = native.get("step"), native.get("batch_size")
+    if (type(step) is not int or not 0 < step <= saved["steps"]
+            or type(batch) is not int or batch != saved["batch_size"]
+            or type(native.get("num_processes")) is not int or native["num_processes"] != 1):
+        raise ValueError("continuation requires native step/batch/world-size evidence")
+    scheduler_state = load_json_strict(policy.parent / "training_state/scheduler_state.json")
+    groups = json.loads((policy.parent / "training_state/optimizer_param_groups.json").read_text())
+    if (not isinstance(groups, list) or not groups or any(not isinstance(group, dict) for group in groups)
+            or type(scheduler_state.get("last_epoch")) is not int or scheduler_state["last_epoch"] != step
+            or scheduler_state.get("_last_lr") != [group.get("lr") for group in groups]):
+        raise ValueError("continuation optimizer/scheduler position differs from native step")
+    if (saved["policy"].get("type") != "smolvla" or saved.get("num_workers") != 0
+            or saved["policy"].get("use_amp") is not False
+            or saved["policy"].get("compile_model", False)
+            or saved["policy"].get("drop_n_last_frames", 0) != 0
+            or saved["dataset"].get("streaming", False)
+            or saved["dataset"].get("image_transforms", {}).get("enable", False)
+            or saved.get("sample_weighting") is not None or saved.get("env") is not None
+            or saved.get("reward_model") is not None or saved.get("peft") is not None
+            or saved.get("scheduler", {}).get("type") != "cosine_decay_with_warmup"):
+        raise ValueError("continuation supports only native SmolVLA world1/workers0/noAMP/deterministic transforms")
+    size = receipt["normalization"]["stats"]["action"]["count"][0]
+    if isinstance(size, bool) or not isinstance(size, (int, float)) or size < 1 or int(size) != size:
+        raise ValueError("continuation requires exact TRAIN frame count")
+    initial = receipt.get("initialization", {})
+    if initial.get("mode") == "continuation":
+        import copy
+        from tools.data_factory.training_entrypoint import options
+
+        config = options(receipt["normalized_argv"][1:])
+        expected = load_json_strict(Path(initial["checkpoint"]) / "train_config.json")
+        for key in ("steps", "batch_size", "eval_steps", "save_freq"):
+            expected[key] = int(config[f"--{key}"])
+        expected["output_dir"] = config["--output_dir"]
+        expected["resume"] = True
+        actual = copy.deepcopy(saved)
+        # Native same-output recovery points at its own earlier checkpoint.
+        source = Path(actual["policy"]["pretrained_path"]).resolve()
+        source_output = source.parent.parent.parent
+        if source != Path(initial["checkpoint"]) and source_output != policy.parent.parent.parent:
+            raise ValueError("continuation saved policy source differs from lineage")
+        actual["policy"]["pretrained_path"] = expected["policy"]["pretrained_path"]
+        actual["checkpoint_path"] = expected.get("checkpoint_path")
+        if actual != expected:
+            raise ValueError("continuation saved recipe differs from inherited configuration")
+        state = load_json_strict(policy.parent / "training_state" / CONTINUATION_STATE)
+        import math
+        expected_cursor = advance_sample_cursor(initial["cursor"], step - initial["step"], batch)
+        if (set(state) != {"schema_version", "step", "cursor", "schedule", "python_gauss", "numpy_gauss"}
+                or state["schema_version"] != "fr5-native-continuation-state-v1"
+                or type(state["step"]) is not int or state["step"] != step
+                or any(type(state["cursor"].get(key)) is not int for key in expected_cursor)
+                or state["cursor"] != expected_cursor or state["cursor"]["num_frames"] != int(size)
+                or state["schedule"] != initial["schedule"]
+                or type(state["schedule"].get("native_horizon")) is not int
+                or (state["schedule"].get("hold_from_step") is not None
+                    and type(state["schedule"]["hold_from_step"]) is not int)
+                or type(state["numpy_gauss"]) not in (int, float)
+                or any(value is not None and (type(value) not in (int, float) or not math.isfinite(value))
+                       for value in (state["python_gauss"], state["numpy_gauss"]))):
+            raise ValueError("continuation checkpoint committed state differs from lineage")
+        return state
+    if saved.get("resume", False) or (policy.parent / "training_state" / CONTINUATION_STATE).exists():
+        raise ValueError("legacy resumed sample history is not reconstructible")
+    cursor = advance_sample_cursor({"num_frames": int(size), "epoch": 0, "offset": 0}, step, batch)
+    return {"schema_version": "fr5-native-continuation-state-v1", "step": step, "cursor": cursor,
+            "schedule": {"native_horizon": saved["steps"], "hold_from_step": None},
+            "python_gauss": None, "numpy_gauss": None}
+
+
+def continuation_argv(parent: Path, parent_receipt: dict, *, output: Path, steps: int,
+                      batch_size: int, eval_steps: int, save_freq: int, schedule: str) -> list[str]:
+    """Inherit all recipe/data settings; expose only the declared continuation choices."""
+    from tools.data_factory.training_entrypoint import options
+
+    config = options(parent_receipt["normalized_argv"][1:])
+    config.update({"--policy.path": str(parent), "--output_dir": str(output), "--steps": str(steps),
+                   "--batch_size": str(batch_size), "--eval_steps": str(eval_steps), "--save_freq": str(save_freq),
+                   "--fr5.continue_from": str(parent), "--fr5.continuation_schedule": schedule})
+    return [parent_receipt["normalized_argv"][0], *[f"{k}={v}" for k, v in config.items()]]
+
+
+def continuation_binding(value: Path, split: dict, normalization: dict, argv: list[str]) -> dict:
+    from tools.data_factory.training_entrypoint import options
+    from tools.data_factory.training_receipts import tree_digest
+    from tools.fr5_data_factory import canonical_digest, load_json_strict
+
+    binding = warm_start_binding(value, split, normalization)
+    parent = Path(binding["checkpoint"])
+    output = parent.parent.parent.parent
+    receipt_path = output / "fr5_training_receipt.json"
+    # A continuation requires settled parent publication, unlike legacy inspection.
+    parent_receipt = load_json_strict(receipt_path)
+    state = continuation_checkpoint_state(parent, parent_receipt)
+    if (tree_digest(parent.parent) != binding["checkpoint_artifact_digest"]
+            or canonical_digest(parent_receipt) != binding["training_receipt_digest"]):
+        raise ValueError("continuation parent changed during state binding")
+    config = options(argv[1:])
+    mode = config.get("--fr5.continuation_schedule")
+    steps, batch, evaluation, save = (int(config[k]) for k in
+                                     ("--steps", "--batch_size", "--eval_steps", "--save_freq"))
+    destination = Path(config["--output_dir"]).expanduser().resolve()
+    if (mode not in {"preserve", "hold"} or steps <= state["step"] or batch < 1
+            or not 1 <= evaluation <= steps or not 1 <= save <= steps
+            or destination.is_relative_to(output) or output.is_relative_to(destination)):
+        raise ValueError("invalid continuation output, horizon or schedule")
+    expected = continuation_argv(parent, parent_receipt, output=destination, steps=steps,
+                                 batch_size=batch, eval_steps=evaluation, save_freq=save, schedule=mode)
+    if options(expected[1:]) != config:
+        raise ValueError("continuation must inherit the parent's complete recipe")
+    schedule = dict(state["schedule"])
+    if mode == "hold" and schedule["hold_from_step"] is None:
+        schedule["hold_from_step"] = state["step"]
+    return {**binding, "mode": "continuation", "reset": [], "step": state["step"],
+            "cursor": state["cursor"], "schedule": schedule}
+
 
 def warm_start_binding(value: Path, split: dict, normalization: dict) -> dict:
     """Validate a local parent for a fresh optimizer run on the same learning data."""
@@ -376,6 +520,8 @@ def validate_checkpoint(value: Path, *, verify_dataset: bool = True) -> tuple[Pa
             if config.get("policy", {}).get("pretrained_path") != receipt["initialization"]["checkpoint"]:
                 raise ValueError("checkpoint warm-start parent differs from admitted initialization")
         validate_normalization_state(policy_dir, receipt["normalization"], profile=feature["profile"])
+        if receipt.get("initialization", {}).get("mode") == "continuation":
+            continuation_checkpoint_state(policy_dir, receipt)
         # Saved observation-view provenance is validated at the same boundary as
         # normalization and dataset lineage; consumers can call the public helper
         # to obtain the exact raw-versus-baked representation without reapplying a

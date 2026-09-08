@@ -8,6 +8,9 @@ usage() {
 Usage:
   scripts/train_policy.sh --check-env [--profile PROFILE]
   scripts/train_policy.sh --resume-from CHECKPOINT [--dry-run]
+  scripts/train_policy.sh --continue-from CHECKPOINT --output NEW_OUTPUT --approved-inventory PATH \
+    --steps ABSOLUTE_END --batch-size N --eval-steps N --save-freq N \
+    --continuation-schedule preserve|hold [--dry-run]
   scripts/train_policy.sh --warm-start-from CHECKPOINT --profile smolvla [launch options]
   scripts/train_policy.sh --profile PROFILE [--root PATH] [--output PATH] [--dry-run] \
     DATASET_NAME [AUGMENTATION] --batch_size=N --steps=N --dataset.eval_split=FRACTION \
@@ -34,11 +37,13 @@ DRY_RUN=0
 CHECK_ENV=0
 RESUME_FROM=""
 WARM_START_FROM=""
+CONTINUE_FROM=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
     --check-env) CHECK_ENV=1; shift ;;
     --resume-from) [[ $# -ge 2 ]] || { echo "--resume-from requires a value" >&2; exit 2; }; RESUME_FROM="$2"; shift 2 ;;
+    --continue-from) [[ $# -ge 2 ]] || { echo "--continue-from requires a value" >&2; exit 2; }; CONTINUE_FROM="$2"; shift 2 ;;
     --warm-start-from) [[ $# -ge 2 ]] || { echo "--warm-start-from requires a value" >&2; exit 2; }; WARM_START_FROM="$2"; shift 2 ;;
     --approved-inventory) APPROVED_INVENTORY="${2:?--approved-inventory requires a path}"; shift 2 ;;
     --collection-profile) COLLECTION_PROFILE="${2:?--collection-profile requires an ID}"; shift 2 ;;
@@ -50,6 +55,17 @@ while [[ $# -gt 0 ]]; do
     *) break ;;
   esac
 done
+
+if [[ -n "$CONTINUE_FROM" ]]; then
+  [[ "$CHECK_ENV" == 0 && -z "$RESUME_FROM" && -z "$WARM_START_FROM" && -z "$PROFILE" && -z "$COLLECTION_PROFILE" && -n "$OUTPUT" && -n "$APPROVED_INVENTORY" && "$DATASET_ROOT" == "${FR5_DATASET_ROOT:-$ROOT/datasets/fr5_episodes}" ]] || {
+    echo "--continue-from inherits the parent recipe and requires a new output/inventory." >&2; exit 2;
+  }
+  CONTINUE_FLAGS=()
+  if [[ "$DRY_RUN" == 1 ]]; then CONTINUE_FLAGS=(--dry-run); fi
+  exec "$ROOT/.venv/bin/python" "$ROOT/tools/data_factory/training_entrypoint.py" continue \
+    --checkpoint "$CONTINUE_FROM" --output "$OUTPUT" --approved-inventory "$APPROVED_INVENTORY" \
+    "${CONTINUE_FLAGS[@]}" "$@"
+fi
 
 if [[ -n "$RESUME_FROM" ]]; then
   [[ "$CHECK_ENV" == 0 && -z "$WARM_START_FROM" && -z "$PROFILE" && -z "$OUTPUT" && -z "$APPROVED_INVENTORY" && -z "$COLLECTION_PROFILE" && "$DATASET_ROOT" == "${FR5_DATASET_ROOT:-$ROOT/datasets/fr5_episodes}" && $# -eq 0 ]] || {
