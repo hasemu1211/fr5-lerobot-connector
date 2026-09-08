@@ -1,0 +1,96 @@
+"""Actual ROS message serialization and native capture methods, without ROS init."""
+import json
+import unittest
+from types import SimpleNamespace
+from unittest import mock
+
+from rclpy.serialization import deserialize_message, serialize_message
+from sensor_msgs.msg import Image, JointState
+
+from tools.fr5_data_factory import ContractError
+from tools.data_factory.motion.moveit_transport import RosMoveItTransport
+from tools.data_factory.motion.pickup_executor import PickupExecutor
+from tools.data_factory.rollout.finite_plan import JOINTS
+
+
+class PolicyObservationTest(unittest.TestCase):
+    def capture(self, *, stamp=100., received=20., state=True, malformed=False,
+                active=False, simulated=False, after_conversion=100., executor=False,
+                paused_system=False, cached=False):
+        def native(message):
+            message.header.stamp.sec = int(stamp)
+            message.header.stamp.nanosec = round((stamp - int(stamp)) * 1e9)
+            return deserialize_message(serialize_message(message), type(message))
+        joint = native(JointState(name=list(reversed(JOINTS)), position=[.012, 6., 5., 4., 3., 2., 1.]))
+        # BGR with row padding: use the recorder's existing conversion behavior.
+        image = native(Image(height=1, width=1, encoding="bgr8", step=4,
+                             data=bytes([1, 2, 3, 99]) if not malformed else b""))
+        callbacks, destroyed = {}, []
+        t = object.__new__(RosMoveItTransport)
+        t._active, t._execution_locked = (object() if active else None), False
+        steady = [20.]
+        t._clock = lambda: steady[0]
+        t.graph_timeout_s = .001
+        t._joint_state = joint if cached else None
+        t._joint_state_received_at = None
+        def subscribe(_type, topic, callback, _qos):
+            callbacks[topic] = callback
+            return topic
+        t.node = SimpleNamespace(create_subscription=subscribe,
+                                 destroy_subscription=destroyed.append,
+                                 get_parameter=lambda _: SimpleNamespace(value=simulated))
+        def spin(*_, **__):
+            if paused_system:
+                steady[0] = 21.
+            if state:
+                t._joint_state, t._joint_state_received_at = joint, received
+            for callback in callbacks.values():
+                callback(image)
+        t._rclpy = SimpleNamespace(spin_once=spin)
+        self.callbacks, self.destroyed, self.transport = callbacks, destroyed, t
+        options = {"camera_topics": {"camera1": "/up", "camera2": "/wrist"}, "max_observation_age_s": .3}
+        with mock.patch("tools.data_factory.motion.moveit_transport.time.time", side_effect=[100., 100., after_conversion]):
+            if executor:
+                e = PickupExecutor(t)
+                return e.process({"schema_version": "fr5.pickup_executor.command.v4", "op_id": "capture-1",
+                                  "op": "capture_observation", "payload": options})
+            return t.capture_policy_observation(options["camera_topics"], options["max_observation_age_s"])
+
+    def test_serialized_capture_preserves_source_stamp_full_state_rgb_and_json(self):
+        result = json.loads(json.dumps(self.capture(executor=True)))
+        self.assertTrue(result["ok"], result)
+        observation = result["data"]["observation"]
+        self.assertEqual(observation["observation.state"], [1., 2., 3., 4., 5., 6., .012])
+        self.assertEqual(observation["source_timestamps_s"], dict.fromkeys(("state", "camera1", "camera2"), 100.))
+        self.assertEqual(observation["observation.images.camera1"], {
+            "dtype": "uint8", "color_space": "RGB", "shape": [1, 1, 3], "data_hex": "030201"})
+        self.assertCountEqual(self.destroyed, ["/up", "/wrist"])
+        self.assertIsNone(self.transport._active)
+
+    def test_stale_paused_future_receipt_and_conversion_fail_without_goals(self):
+        for options, code in [({"stamp": 99.}, "LEARNED_STALE_OBSERVATION"),
+                              ({"stamp": 101.}, "LEARNED_STALE_OBSERVATION"),
+                              ({"received": 21.}, "LEARNED_STALE_OBSERVATION"),
+                              ({"received": 19.}, "LEARNED_OBSERVATION_UNAVAILABLE"),
+                              ({"state": False}, "LEARNED_OBSERVATION_UNAVAILABLE"),
+                              ({"cached": True}, "LEARNED_OBSERVATION_UNAVAILABLE"),
+                              ({"paused_system": True}, "LEARNED_SOURCE_CLOCK"),
+                              ({"after_conversion": 100.4}, "LEARNED_STALE_OBSERVATION"),
+                              ({"malformed": True}, "LEARNED_IMAGE"),
+                              ({"simulated": True}, "LEARNED_SOURCE_CLOCK"),
+                              ({"active": True}, "ROS_EXEC_ACTIVE")]:
+            with self.subTest(options=options):
+                with self.assertRaises(ContractError) as error:
+                    self.capture(**options)
+                self.assertEqual(error.exception.code, code)
+            self.assertCountEqual(self.destroyed, list(self.callbacks))
+
+    def test_child_never_captures_after_plan_or_on_non_native_transport(self):
+        request = {"schema_version": "fr5.pickup_executor.command.v4", "op_id": "capture-1",
+                   "op": "capture_observation", "payload": {"camera_topics": {"camera1": "/up", "camera2": "/wrist"},
+                                                            "max_observation_age_s": .3}}
+        executor = PickupExecutor(SimpleNamespace())
+        self.assertEqual(executor.process(request)["code"], "LEARNED_OBSERVATION_UNAVAILABLE")
+        executor.runs["previous"] = {"state": "PLANNED"}
+        request["op_id"] = "capture-2"
+        self.assertEqual(executor.process(request)["code"], "ONE_JOB_ONLY")

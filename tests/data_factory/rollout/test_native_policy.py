@@ -312,6 +312,42 @@ class NativePolicyTest(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["data"]["finite_learned_plan"]["plan"]["execution_kind"], "FINITE_LEARNED_PROBE")
         self.assertEqual(transport2.sent, [])
+        # The same normal entrypoint can acquire its observation from the sole
+        # child after model load, then reuse that child for exact-plan creation.
+        captured_transport = Transport()
+        captured_transport.current = [0.] * 7
+        loaded, requests, closed = [], [], []
+        def capture_wire(topics, age):
+            self.assertEqual(loaded, [True])
+            self.assertEqual(topics, {"camera1": "/up", "camera2": "/wrist"})
+            self.assertEqual(age, .3)
+            value = capture()
+            for key in ("observation.images.camera1", "observation.images.camera2"):
+                value[key]["data_hex"] = value[key].pop("data").hex()
+            return value
+        captured_transport.capture_policy_observation = capture_wire
+        captured_executor = PickupExecutor(captured_transport)
+        def request_capture(request, _cancel):
+            requests.append(request["op"])
+            return captured_executor.process(request)
+        captured_child = SimpleNamespace(request=request_capture, close=lambda **_: closed.append(True))
+        factory = mock.Mock(return_value=captured_child)
+        def load(*_, **__):
+            loaded.append(True)
+            return native
+        with mock.patch.object(NativeSmolVLA, "load", side_effect=load):
+            captured_result = run_learned_plan_only({**payload, "run_id": "native-capture"}, threading.Event(), lambda _: None,
+                checkpoint=self.policy_dir, camera_topics={"camera1": "/up", "camera2": "/wrist"},
+                instruction="synthetic probe", period_s=1.5,
+                resolver=lambda _: ({"normalized_job": {}, "resolved_job_digest": original["resolved_job_digest"]}, original, SCENE),
+                executor_factory=factory)
+        self.assertTrue(captured_result["ok"], captured_result)
+        frozen_capture = captured_result["data"]["finite_learned_plan"]["plan"]["learned_proposal"]
+        np.testing.assert_allclose(frozen_capture["actions"], [self.mean_action, self.mean_action])
+        self.assertEqual(requests, ["capture_observation", "plan"])
+        factory.assert_called_once()
+        self.assertEqual(closed, [True])
+        self.assertEqual(captured_transport.sent, [])
         # The top native API must expose the same explicit held-target opt-in;
         # exercise its real inference/program/planner consumers, not a kwargs spy.
         held_source = source()

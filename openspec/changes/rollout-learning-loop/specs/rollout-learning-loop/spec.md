@@ -476,3 +476,39 @@ absence supplies no controller-start evidence.
   identity, timely first sampling, source-clock mapping or hardware completion
 - **AND** existing freshness, same-command completion and cancellation checks
   remain in force without a new execution mode or controller owner
+
+### Requirement: Native finite inference consumes original fresh observation sources
+
+The existing finite checkpoint-to-plan entrypoint SHALL support bounded capture
+of configured camera1/camera2 topics and complete seven-joint JointState on the
+sole motion transport's existing node after model load. Capture SHALL subscribe
+and read only, reuse the existing image conversion, preserve original header
+timestamps and absolute radians/meters, and reject simulated clock operation,
+missing messages, stale/future source or receipt time and unresolved motion.
+It SHALL NOT start a recorder, send a goal, modify source data or confer any
+physical or future-policy authority. The same child SHALL then compile the
+frozen full output through the existing planner.
+
+#### Scenario: Model load precedes fresh native capture
+
+- **WHEN** the existing consumer is called with explicit two-camera topics and no supplied offline observation
+- **THEN** canonical model admission/load finishes before the child captures new state/camera messages
+- **AND** the retained original timestamps are checked before and after inference
+- **AND** one child processes capture and planning, with zero goal/recorder effects
+
+#### Scenario: A repeated publication carries stale source time
+
+- **WHEN** callbacks arrive recently but their source headers exceed the configured observation age
+- **THEN** capture fails without inference or planning
+- **AND** conversion time consumes the same source freshness budget
+
+#### Scenario: Cancellation or capture failure precedes planning
+
+- **WHEN** cancellation occurs during model loading or native capture, or capture fails
+- **THEN** no later inference or plan is accepted and any acquired child is closed
+- **AND** explicit offline observations remain supported without silently starting camera capture
+
+This observation producer does not discharge execution-time state admission,
+controller start/pause coherence, staged-release consumption or physical
+qualification. Generation freshness and execution freshness remain distinct
+requirements; original input timestamps SHALL NOT be silently refreshed.

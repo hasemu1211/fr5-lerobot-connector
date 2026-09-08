@@ -49,7 +49,7 @@ PHASES = (
 ARM_PHASES = frozenset(PHASES) - {"GRIPPER_CLOSE", "GRIPPER_OPEN"}
 JOINT_ORDER = ["j1", "j2", "j3", "j4", "j5", "j6"]
 COMMAND_FIELDS = {"schema_version", "op_id", "op", "payload"}
-COMMAND_OPS = {"preflight", "plan", "approve", "execute", "heartbeat", "confirm", "grasp_verdict", "semantic_verdict", "release_verdict", "cancel", "status"}
+COMMAND_OPS = {"preflight", "capture_observation", "plan", "approve", "execute", "heartbeat", "confirm", "grasp_verdict", "semantic_verdict", "release_verdict", "cancel", "status"}
 ACTIVE_STATES = {"EXECUTING", "PRECONTACT_HUMAN", "GRASP_VERDICT", "SEMANTIC_VERDICT", "RELEASE_VERDICT"}
 RECYCLE_PHASES = ("RECYCLE_APPROACH_PTP", "LOWER_LIN", "GRIPPER_OPEN", "RETREAT_LIN", "SAFE_POSE_PTP")
 EXECUTION_RESULT_MARGIN_S = 2.0
@@ -395,6 +395,16 @@ class PickupExecutor:
         snapshot = copy.deepcopy(result)
         self.cache[op_id] = (request_digest, snapshot)
         return copy.deepcopy(snapshot)
+
+    def _capture_observation(self, payload):
+        _exact(payload, {"camera_topics", "max_observation_age_s"}, "LEARNED_OBSERVATION_SCHEMA")
+        if self.runs or self.motion_only_binding_digest is not None:
+            raise ContractError("ONE_JOB_ONLY")
+        capture = getattr(self.transport, "capture_policy_observation", None)
+        if capture is None:
+            raise ContractError("LEARNED_OBSERVATION_UNAVAILABLE")
+        observation = capture(payload["camera_topics"], payload["max_observation_age_s"])
+        return _response(code="LEARNED_OBSERVATION", ok=True, state="IDLE", data={"observation": observation})
 
     def _validated_preflight(self, motion_program):
         validate_motion_program(motion_program)

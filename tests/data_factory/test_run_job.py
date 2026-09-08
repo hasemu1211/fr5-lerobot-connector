@@ -86,6 +86,51 @@ class Executor:
 
 
 class RunJobTest(unittest.TestCase):
+    def test_native_observation_failure_and_cancellation_close_the_same_child(self):
+        from tools.data_factory.learned_action_adapter import NativeSmolVLA
+        from tools.data_factory.rollout.finite_plan import FinitePolicyInference
+        for failure in ("capture", "cancel_after_load", "cancel_after_capture", "malformed", "ambiguous"):
+            with self.subTest(failure=failure):
+                cancel = threading.Event()
+                child = mock.Mock()
+                factory = mock.Mock(return_value=child)
+                def load(*_, **__):
+                    if failure == "cancel_after_load":
+                        cancel.set()
+                    return SimpleNamespace(checkpoint={})
+                def capture(*_):
+                    if failure == "cancel_after_capture":
+                        cancel.set()
+                    if failure == "capture":
+                        return {"ok": False, "code": "LEARNED_STALE_OBSERVATION"}
+                    frame = {"dtype": "uint8", "color_space": "RGB", "shape": [1, 1, 3], "data_hex": "000000"}
+                    value = {key: dict(frame) for key in ("observation.images.camera1", "observation.images.camera2")}
+                    if failure == "malformed":
+                        value["observation.images.camera1"]["data"] = "ambiguous"
+                    return {"ok": True, "data": {"observation": value}}
+                child.request.side_effect = capture
+                with mock.patch.object(NativeSmolVLA, "load", side_effect=load) as loader, \
+                        mock.patch.object(FinitePolicyInference, "propose") as infer:
+                    result = run_job.run_learned_plan_only({"run_id": "capture"}, cancel, lambda _: None,
+                        checkpoint="synthetic", camera_topics={"camera1": "/up", "camera2": "/wrist"},
+                        observation={} if failure == "ambiguous" else None,
+                        instruction="probe", period_s=.1,
+                        resolver=lambda _: ({}, motion(), SCENE), executor_factory=factory)
+                self.assertFalse(result["ok"], result)
+                expected = {"capture": "LEARNED_STALE_OBSERVATION", "cancel_after_load": "LEARNED_CANCELLED",
+                            "cancel_after_capture": "LEARNED_CANCELLED", "malformed": "LEARNED_OBSERVATION_SCHEMA",
+                            "ambiguous": "LEARNED_OBSERVATION_SCHEMA"}[failure]
+                self.assertEqual(result["code"], expected)
+                infer.assert_not_called()
+                if failure in {"cancel_after_load", "ambiguous"}:
+                    factory.assert_not_called()
+                    child.close.assert_not_called()
+                else:
+                    child.close.assert_called_once()
+                    self.assertEqual(child.request.call_args[0][0]["op"], "capture_observation")
+                if failure == "ambiguous":
+                    loader.assert_not_called()
+
     def test_runtime_yaw_scope_rejects_redigested_out_of_design_cell(self):
         repository = Path(__file__).resolve().parents[2]
         object_profile = run_job.load_json_strict(

@@ -2333,23 +2333,48 @@ def _write_episode_ledger(
     }
 
 
-def run_learned_plan_only(payload, cancel, publish, *, checkpoint, observation,
+def run_learned_plan_only(payload, cancel, publish, *, checkpoint, observation=None, camera_topics=None,
                           instruction, period_s, max_observation_age_s=.3,
                           device="cpu", held_gripper_targets=False,
                           resolver=resolve_inputs, executor_factory=_executor):
     """Native checkpoint-to-existing-planner entry point; no recorder or motion.
 
+    Without a supplied offline observation, the existing motion child captures
+    configured camera topics and seven-joint state after model load, then plans
+    on that same child. Capture subscribes only; it does not start a recorder.
     The returned exact finite plan still needs all existing physical bindings and
     human approvals. This API authorizes neither online outputs nor dataset commit.
     """
     from tools.data_factory.learned_action_adapter import NativeSmolVLA
     from tools.data_factory.rollout.finite_plan import FinitePolicyInference, compile_program
+    child, transferred = None, False
     try:
+        if observation is not None and camera_topics is not None:
+            raise ContractError("LEARNED_OBSERVATION_SCHEMA")
         validated, source, scene = resolver(payload)
         if cancel.is_set():
             raise ContractError("LEARNED_CANCELLED")
         native = NativeSmolVLA.load(checkpoint, device=device)
+        if cancel.is_set():
+            raise ContractError("LEARNED_CANCELLED")
         inference = FinitePolicyInference(native, native.checkpoint, cancel_event=cancel)
+        if observation is None:
+            child = executor_factory(_timeout_s(source))
+            captured = _runtime_child_request(child, {
+                "schema_version": "fr5.pickup_executor.command.v4",
+                "op_id": "learned-observation", "op": "capture_observation",
+                "payload": {"camera_topics": camera_topics, "max_observation_age_s": max_observation_age_s},
+            }, cancel)
+            if not captured.get("ok"):
+                raise ContractError(captured.get("code", "LEARNED_OBSERVATION_UNAVAILABLE"))
+            observation = copy.deepcopy(captured["data"]["observation"])
+            for key in ("observation.images.camera1", "observation.images.camera2"):
+                frame = observation[key]
+                if set(frame) != {"dtype", "color_space", "shape", "data_hex"}:
+                    raise ContractError("LEARNED_OBSERVATION_SCHEMA")
+                frame["data"] = bytes.fromhex(frame.pop("data_hex"))
+        if cancel.is_set():
+            raise ContractError("LEARNED_CANCELLED")
         proposal = inference.propose(
             observation() if callable(observation) else observation, instruction=instruction,
             robot_description=Path(payload["urdf"]).read_text(),
@@ -2358,12 +2383,19 @@ def run_learned_plan_only(payload, cancel, publish, *, checkpoint, observation,
             velocity_scaling=min(step["limits"]["velocity_scaling"] for step in source["steps"] if "velocity_scaling" in step["limits"]),
         )
         program = compile_program(source, proposal)
+        def planning_child(timeout_s):
+            nonlocal transferred
+            transferred = child is not None
+            return child if child is not None else executor_factory(timeout_s)
         return run_plan_only(payload, cancel, publish,
-                             resolver=lambda _: (validated, program, scene), executor_factory=executor_factory)
+                             resolver=lambda _: (validated, program, scene), executor_factory=planning_child)
     except ContractError as exc:
         return _response(ok=False, code=exc.code, state="BLOCKED", run_id=payload.get("run_id"))
     except Exception:
         return _response(ok=False, code="LEARNED_PREPARATION_FAILED", state="BLOCKED", run_id=payload.get("run_id"))
+    finally:
+        if child is not None and not transferred:
+            child.close(timeout_s=1.0 if cancel.is_set() else None)
 
 
 def learned_run_diagnostic(result):

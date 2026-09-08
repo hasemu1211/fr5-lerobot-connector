@@ -77,3 +77,17 @@ Focused held hardware evidence acceptance (CPU only; no driver installation):
 direnv exec . python3 -m unittest discover -s tests/data_factory/rollout
 direnv exec . python3 -m unittest tests.data_factory.test_motion_transport_execution tests.data_factory.test_motion
 ```
+
+## Native observation-to-plan bridge
+
+- [x] Add bounded source-stamped state and two-camera capture to the sole motion child's existing protocol, reusing the recorder's image conversion and retaining absolute seven-joint feedback.
+- [x] Consume native capture after admitted model load through `run_learned_plan_only`, reusing that child for exact-plan compilation; preserve the supplied offline-observation path.
+- [x] Verify actual ROS serializers, stale/paused/future source rejection, missing input, cancellation and saved-processor-to-plan consumption without goals or recorder effects.
+- [ ] Separate immutable inference input-age evidence from fresh execution-state admission across approval delay; do not renew original input stamps or merely enlarge the age budget.
+- [ ] Connect the resulting exact-plan consumer to current source-clock deployment and continuous seven-joint controller timing before physical execution; no future output inherits its approval.
+
+Focused native capture/consumer checks:
+
+```sh
+direnv exec . python3 -m unittest tests.data_factory.rollout.test_policy_observation tests.data_factory.rollout.test_native_policy tests.data_factory.test_run_job.RunJobTest.test_native_observation_failure_and_cancellation_close_the_same_child
+```
