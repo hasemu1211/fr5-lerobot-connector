@@ -47,12 +47,16 @@ const {randomUUID} = require("node:crypto");
   await vm.runInContext("loadView()", context);
   await vm.runInContext("submitIntent('refresh_stored_reviews', {})", context);
   await vm.runInContext("submitIntent('select_stored_review', {run_id:selectedRun})", context);
+  if (mode === "batch") await vm.runInContext("submitIntent('freeze_review_batch', {run_ids:currentView.stored_reviews.episodes.map(item=>item.run_id)})", context);
   if (mode === "return") await vm.runInContext("submitIntent('inspect_stored_episode', {review_binding_digest:currentView.candidate_review.review_binding_digest})", context);
   methods.length = 0;
   drop = true;
-  if (mode === "review") await vm.runInContext("submitIntent('review_candidate', {review_binding_digest:currentView.candidate_review.review_binding_digest,choice:'PASS',reason:null})", context);
+  if (mode === "batch") await vm.runInContext("submitIntent('review_stored_batch', {batch_binding_digest:currentView.stored_reviews.batch.selection.batch_binding_digest,choice:'PASS',reason:null,excluded_run_ids:[]})", context);
+  else if (mode === "review") await vm.runInContext("submitIntent('review_candidate', {review_binding_digest:currentView.candidate_review.review_binding_digest,choice:'PASS',reason:null})", context);
   else await vm.runInContext(`submitIntent('${mode === "return" ? "return_stored_review" : "inspect_stored_episode"}', {review_binding_digest:currentView.candidate_review.review_binding_digest})`, context);
   console.log(JSON.stringify({methods, review: vm.runInContext("currentView.candidate_review", context),
     inspection: vm.runInContext("currentView.stored_reviews.inspection", context),
+    batch: vm.runInContext("currentView.stored_reviews.batch", context),
+    batchCard: node("#batch-frozen-items").innerHTML,
     card: node("#review-queue").innerHTML}));
 })().catch((error) => { console.error(error); process.exitCode = 1; });

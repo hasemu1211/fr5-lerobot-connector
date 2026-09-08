@@ -79,6 +79,17 @@ class StoredInspectionTests(unittest.TestCase):
         self.assertIsNone(self.app._campaign)
         self.fixture.assert_immutable()
 
+    def test_frozen_batch_keeps_exact_set_across_individual_inspection_and_return(self):
+        selection = self.fixture.freeze(self.app)
+        self.send("inspect_stored_episode")
+        self.assertEqual(self.inspection()["status"], "READY")
+        self.send("return_stored_review")
+        batch = self.app.projection()["stored_reviews"]["batch"]
+        self.assertEqual(batch["selection"], selection)
+        self.assertEqual(batch["state"], "FROZEN")
+        self.assertEqual([item["status"] for item in batch["items"]], ["PENDING", "PENDING"])
+        self.fixture.assert_immutable()
+
     def test_failure_is_optional_and_wrong_binding_and_replay_do_not_open(self):
         for payload in ({"review_binding_digest": "wrong"}, {**self.payload, "dataset_root": "/tmp/other"}):
             with self.assertRaisesRegex(ContractError, "INSPECTION_TARGET"):

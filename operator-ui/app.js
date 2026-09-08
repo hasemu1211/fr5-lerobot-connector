@@ -55,6 +55,12 @@ let disabledBeforeFailure;
 let manualStep;
 let renderedWorkflow;
 let renderedWorkflowStep;
+const BATCH_STORAGE_KEY = "fr5-stored-review-selection-v1";
+let savedBatchSelection = null;
+try { savedBatchSelection = JSON.parse(globalThis.localStorage?.getItem(BATCH_STORAGE_KEY) ?? "null"); } catch (_) {}
+let batchDraft = new Set();
+let batchExcluded = new Set();
+let batchRenderBinding = null;
 
 const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (character) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -1717,6 +1723,7 @@ function renderStoredInspection(view) {
 
 function renderResults(view) {
   renderStoredInspection(view);
+  renderStoredBatch(view);
   const stored = view.stored_reviews;
   const storedControls = document.querySelector("#stored-review-controls");
   if (storedControls) {
@@ -1799,6 +1806,67 @@ function renderResults(view) {
   const nextReason = document.querySelector("#candidate-reason");
   if (nextReason && reasons.includes(reasonDraft)) nextReason.value = reasonDraft;
   if (restoreFocus) nextReason?.focus({preventScroll: true});
+}
+
+function renderStoredBatch(view) {
+  const panel = document.querySelector("#stored-batch");
+  if (!panel) return;
+  const stored = view.stored_reviews;
+  panel.hidden = !stored;
+  if (!stored) return;
+  const batch = stored.batch;
+  const binding = batch?.selection.batch_binding_digest ?? null;
+  if (binding !== batchRenderBinding) {
+    batchExcluded = new Set();
+    document.querySelector("#batch-choice").value = "";
+    document.querySelector("#batch-reason").value = "";
+    batchRenderBinding = binding;
+  }
+  if (batch && savedBatchSelection?.batch_binding_digest !== binding) {
+    savedBatchSelection = batch.selection;
+    try { globalThis.localStorage?.setItem(BATCH_STORAGE_KEY, JSON.stringify(savedBatchSelection)); } catch (_) {}
+  }
+  const checklist = document.querySelector("#batch-checklist");
+  const options = [...new Set(stored.episodes.filter(item => item.status === "PENDING").map(item => item.checklist_id))];
+  const optionsHtml = options.map(id => `<option value="${escapeHtml(id)}">${escapeHtml(id)}</option>`).join("");
+  if (checklist.dataset.options !== optionsHtml) { checklist.innerHTML = optionsHtml; checklist.dataset.options = optionsHtml; }
+  const editable = canIntent("freeze_review_batch");
+  document.querySelector("#batch-select-pending").disabled = !editable;
+  document.querySelector("#batch-clear-selection").disabled = !editable;
+  const list = document.querySelector("#batch-selection-list");
+  const listing = stored.episodes.map(item => `<div class="batch-item"><label><input type="checkbox" data-batch-select="${escapeHtml(item.run_id)}" ${batchDraft.has(item.run_id) ? "checked" : ""} ${editable && item.status === "PENDING" ? "" : "disabled"}>#${item.episode_index} · ${escapeHtml(item.task_id ?? item.checklist_id)} · ${escapeHtml(semanticReviewLabel(item.status))}<small>${escapeHtml(item.run_id)}</small></label></div>`).join("");
+  if (list.dataset.content !== listing) { list.innerHTML = listing; list.dataset.content = listing; }
+  const freeze = document.querySelector("#freeze-review-batch");
+  freeze.disabled = !editable || !batchDraft.size || batchDraft.size > stored.batch_limit;
+  freeze.textContent = `선택 ${batchDraft.size}개 고정 (최대 ${stored.batch_limit})`;
+  const recover = document.querySelector("#recover-review-batch");
+  recover.hidden = !savedBatchSelection;
+  recover.disabled = !canIntent("recover_review_batch");
+  const stateLabel = {FROZEN: "선택 고정 · 아직 판정하지 않음", APPLYING: "순서대로 기록 중 · 결과 미확정", FINISHED: "순차 기록 종료 · 항목별 결과 확인", INTERRUPTED: "중단됨 · 항목별 결과 확인", RECOVERED: "현재 저장 결과 확인 · 판정 재개 없음"};
+  document.querySelector("#batch-status").textContent = batch
+    ? `${batch.items.length}개 · ${stateLabel[batch.state] ?? batch.state}${batch.error ? ` · ${batch.error}` : ""}. 새 에피소드는 이 집합에 자동 추가되지 않습니다.`
+    : savedBatchSelection ? "이 브라우저에 선택 집합이 남아 있습니다. 현재 결과 확인은 판정을 보내지 않습니다." : "선택 집합을 고정하면 정확한 대상과 공통 판정을 함께 확인할 수 있습니다.";
+  const frozen = document.querySelector("#batch-frozen-items");
+  const rows = (batch?.items ?? []).map(item => `<div class="batch-item"><label>${batch.state === "FROZEN" ? `<input type="checkbox" data-batch-include="${escapeHtml(item.run_id)}" ${batchExcluded.has(item.run_id) ? "" : "checked"} ${canIntent("review_stored_batch") ? "" : "disabled"}>포함 · ` : ""}#${item.episode_index ?? "?"} · ${escapeHtml(item.task_id ?? item.checklist_id ?? "근거 확인 불가")} · ${escapeHtml(item.binding_status === "UNAVAILABLE" || item.binding_status === "CHANGED" ? "근거 변경/확인 불가" : semanticReviewLabel(item.status))}<small>${escapeHtml(item.run_id)}${item.reviewed_by ? ` · ${escapeHtml(item.reviewed_by)} · ${escapeHtml(item.reviewed_at)}` : ""}${item.reason ? ` · ${escapeHtml(message("review_reason", item.reason))}` : ""}</small></label><button type="button" class="secondary-button" data-batch-inspect="${escapeHtml(item.run_id)}" ${canIntent("select_stored_review") ? "" : "disabled"}>검토·개별 판정</button></div>`).join("");
+  if (frozen.dataset.content !== rows) { frozen.innerHTML = rows; frozen.dataset.content = rows; }
+  const form = document.querySelector("#batch-decision-form");
+  form.hidden = batch?.state !== "FROZEN";
+  if (batch?.state === "FROZEN") {
+    const id = batch.selection.items[0].checklist_id;
+    document.querySelector("#batch-checklist-guide").textContent = `${id} · 각 항목의 객체·출발 조건, 파지/리프트, 동작 흐름과 ${id === "pick-place-v1" ? "목적지에 놓기·해제" : "집어 올리기"}, 예상하지 못한 접촉과 영상 확인 가능 여부를 검토하세요. 모든 포함 항목에 같은 판단이 맞을 때 기록하세요.`;
+    const reason = document.querySelector("#batch-reason");
+    if (!reason.dataset.ready) {
+      reason.innerHTML = '<option value="">이유 선택</option>' + (stored.review_reasons ?? []).map(value => `<option value="${escapeHtml(value)}">${escapeHtml(message("review_reason", value))}</option>`).join("");
+      reason.dataset.ready = "true";
+    }
+    const choice = document.querySelector("#batch-choice").value;
+    reason.disabled = choice === "PASS" || !canIntent("review_stored_batch");
+    reason.required = !!choice && choice !== "PASS";
+    document.querySelector("#batch-choice").disabled = !canIntent("review_stored_batch");
+    const count = batch.items.length - batchExcluded.size;
+    document.querySelector("#batch-decision-summary").textContent = `고정 ${batch.items.length}개 중 포함 ${count}개 → ${choice ? semanticReviewLabel(choice) : "판정 미선택"}${choice && choice !== "PASS" && reason.value ? ` · ${message("review_reason", reason.value)}` : ""}. 제외 ${batchExcluded.size}개에는 이 판정을 기록하지 않습니다.`;
+    document.querySelector("#apply-review-batch").disabled = !canIntent("review_stored_batch") || !count || !choice || choice !== "PASS" && !reason.value;
+  }
 }
 
 function renderNext(view) {
@@ -2299,6 +2367,40 @@ document.querySelector("#review-queue").addEventListener("click", (event) => {
 });
 document.querySelector("#refresh-stored-reviews")?.addEventListener("click", () => submitIntent("refresh_stored_reviews", {}));
 document.querySelector("#stored-review-select")?.addEventListener("change", (event) => submitIntent("select_stored_review", {run_id: event.target.value || null}));
+document.querySelector("#batch-select-pending")?.addEventListener("click", () => {
+  const checklist = document.querySelector("#batch-checklist").value;
+  batchDraft = new Set(currentView.stored_reviews.episodes.filter(item => item.status === "PENDING" && item.checklist_id === checklist).slice(0, currentView.stored_reviews.batch_limit).map(item => item.run_id));
+  renderStoredBatch(currentView);
+});
+document.querySelector("#batch-clear-selection")?.addEventListener("click", () => { batchDraft.clear(); renderStoredBatch(currentView); });
+document.querySelector("#batch-selection-list")?.addEventListener("change", (event) => {
+  const id = event.target.dataset.batchSelect;
+  if (id) { event.target.checked ? batchDraft.add(id) : batchDraft.delete(id); renderStoredBatch(currentView); }
+});
+document.querySelector("#freeze-review-batch")?.addEventListener("click", () => submitIntent("freeze_review_batch", {run_ids: [...batchDraft]}));
+document.querySelector("#recover-review-batch")?.addEventListener("click", () => {
+  if (savedBatchSelection) submitIntent("recover_review_batch", {selection: savedBatchSelection});
+});
+document.querySelector("#batch-frozen-items")?.addEventListener("change", (event) => {
+  const id = event.target.dataset.batchInclude;
+  if (id) { event.target.checked ? batchExcluded.delete(id) : batchExcluded.add(id); renderStoredBatch(currentView); }
+});
+document.querySelector("#batch-frozen-items")?.addEventListener("click", async (event) => {
+  const id = event.target.closest("button[data-batch-inspect]")?.dataset.batchInspect;
+  if (id) {
+    await submitIntent("select_stored_review", {run_id: id});
+    document.querySelector("#stored-inspection")?.scrollIntoView({block: "center"});
+  }
+});
+document.querySelector("#batch-decision-form")?.addEventListener("change", () => renderStoredBatch(currentView));
+document.querySelector("#batch-decision-form")?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const batch = currentView.stored_reviews.batch;
+  const choice = document.querySelector("#batch-choice").value;
+  if (batch?.state !== "FROZEN" || document.querySelector("#apply-review-batch").disabled) return;
+  submitIntent("review_stored_batch", {batch_binding_digest: batch.selection.batch_binding_digest,
+    choice, reason: choice === "PASS" ? null : document.querySelector("#batch-reason").value, excluded_run_ids: [...batchExcluded]});
+});
 document.querySelector("#inspect-stored-episode")?.addEventListener("click", () => submitIntent("inspect_stored_episode", {review_binding_digest: currentView.candidate_review.review_binding_digest}));
 document.querySelector("#open-stored-inspection")?.addEventListener("click", async () => {
   const key = storedInspectionKey(currentView);

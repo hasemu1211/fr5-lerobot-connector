@@ -5,17 +5,23 @@ import copy
 import fcntl
 import os
 import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 from tools.data_factory import run_job
 from tools.data_factory.candidate_admission import validate_candidate_admission
 from tools.data_factory.episode_ledger import _artifact
-from tools.data_factory.operator.workflow.intents import CandidateReviewPort
+from tools.data_factory.operator.workflow.intents import (
+    CandidateReviewPort, CANDIDATE_REVIEW_CHOICES, CANDIDATE_REVIEW_REASONS,
+)
 from tools.data_factory.operator.workflow.inspection import NativeInspection, verify_target
 from tools.data_factory.training_approval import current_dataset_identity
 from tools.data_factory.task_recipe import validate_episode_instruction_binding
-from tools.fr5_data_factory import ContractError, SAFE_ID, canonical_digest, load_json_strict
+from tools.fr5_data_factory import ContractError, DIGEST, SAFE_ID, canonical_digest, load_json_strict
+
+
+MAX_REVIEW_BATCH = 64
 
 
 class StoredCandidateReviews:
@@ -26,6 +32,7 @@ class StoredCandidateReviews:
         self.entries = {}
         self.selected = None
         self.port = None
+        self.batch = None
         self.inspector = inspection if inspection is not None else NativeInspection(video_only=True)
         self.inspection = {"status": "CLOSED", "target": None}
         self.inspection_dataset = None
@@ -40,7 +47,9 @@ class StoredCandidateReviews:
         inspection = self.inspection
         if inspection["status"] == "READY":
             inspection = {**inspection, **self.inspector.snapshot()}
-        return {**copy.deepcopy(self.public), "inspection": copy.deepcopy(inspection)}
+        return {**copy.deepcopy(self.public), "inspection": copy.deepcopy(inspection),
+                "batch": copy.deepcopy(self.batch), "batch_limit": MAX_REVIEW_BATCH,
+                "review_reasons": list(CANDIDATE_REVIEW_REASONS)}
 
     def _paths(self, run_id):
         if not isinstance(run_id, str) or run_id in {".", ".."} or not SAFE_ID.fullmatch(run_id):
@@ -109,6 +118,7 @@ class StoredCandidateReviews:
                     {"role": item["role"], "pose": copy.deepcopy(item["pose"])} for item in task["spatial_bindings"]],
                 "checklist_id": candidate["checklist_id"], "status": candidate["semantic_status"],
                 "reviewed_by": candidate["reviewed_by"], "reviewed_at": candidate["reviewed_at"],
+                "reason": candidate["reason"],
                 "training_authorized": False}
 
     def _publish(self):
@@ -141,7 +151,18 @@ class StoredCandidateReviews:
             self.select(selected)
         else:
             self._publish()
+        if self.batch is not None:
+            self._observe_batch()
         return self.projection()
+
+    def _port(self, record):
+        candidate = record["candidate"]
+        port = CandidateReviewPort(operator_label=self.operator_label,
+            review_call=lambda path, **kwargs: run_job.review_candidate_admission(path, clock=self.clock, **kwargs))
+        port.offer(candidate_path=record["path"], run_id=candidate["run_id"],
+            expected_file_digest=canonical_digest(candidate),
+            expected_review_context_digest=candidate["review_context_digest"], checklist_id=candidate["checklist_id"])
+        return port
 
     def select(self, run_id):
         self.close()
@@ -152,11 +173,7 @@ class StoredCandidateReviews:
                 raise ContractError("STORED_REVIEW_RUN")
             record = self._load(run_id, recover=True)
             candidate = record["candidate"]
-            port = CandidateReviewPort(operator_label=self.operator_label,
-                review_call=lambda path, **kwargs: run_job.review_candidate_admission(path, clock=self.clock, **kwargs))
-            port.offer(candidate_path=record["path"], run_id=run_id,
-                expected_file_digest=canonical_digest(candidate),
-                expected_review_context_digest=candidate["review_context_digest"], checklist_id=candidate["checklist_id"])
+            port = self._port(record)
             if candidate["semantic_status"] != "PENDING":
                 port.observe_resolved(candidate)
                 port.acknowledge(port.projection()["review_binding_digest"])
@@ -170,17 +187,131 @@ class StoredCandidateReviews:
         if self.selected is None or self.port is None:
             raise ContractError("STORED_REVIEW_RUN")
         record = self.entries[self.selected]
-        # Revalidate canonical committed evidence before the exact candidate CAS.
-        current = self._load(self.selected)
-        if canonical_digest(current["candidate"]) != canonical_digest(record["candidate"]):
-            raise ContractError("CANDIDATE_REVIEW_DIGEST_MISMATCH")
-        result = self.port.resolve_deferred(payload)
-        run_job.bind_candidate_episode_state(record["reference"], record["path"])
+        result = self._decide(record, self.port, payload)
         self.entries[self.selected] = self._load(self.selected)
-        self.port.observe_resolved(self.entries[self.selected]["candidate"])
-        self.port.acknowledge(result["review_binding_digest"])
         self._publish()
+        if self.batch is not None:
+            self._observe_batch()
         return result
+
+    def _decide(self, record, port, payload):
+        # Revalidate canonical committed evidence before the exact candidate CAS.
+        current = self._load(record["candidate"]["run_id"])
+        if current != record:
+            raise ContractError("CANDIDATE_REVIEW_DIGEST_MISMATCH")
+        result = port.resolve_deferred(payload)
+        run_job.bind_candidate_episode_state(record["reference"], record["path"])
+        port.observe_resolved(self._load(record["candidate"]["run_id"])["candidate"])
+        port.acknowledge(result["review_binding_digest"])
+        return result
+
+    @staticmethod
+    def _target(record):
+        candidate = record["candidate"]
+        return {"run_id": candidate["run_id"], "candidate_digest": canonical_digest(candidate),
+                "review_context_digest": candidate["review_context_digest"],
+                "ledger_digest": record["reference"]["ledger_digest"], "checklist_id": candidate["checklist_id"]}
+
+    def freeze_batch(self, payload):
+        run_ids = payload.get("run_ids")
+        if (set(payload) != {"run_ids"} or not isinstance(run_ids, list)
+                or not 1 <= len(run_ids) <= MAX_REVIEW_BATCH
+                or any(not isinstance(item, str) for item in run_ids) or len(set(run_ids)) != len(run_ids)):
+            raise ContractError("STORED_BATCH_SELECTION")
+        records = []
+        for run_id in run_ids:
+            current = self._load(run_id)
+            if current != self.entries.get(run_id) or current["candidate"]["semantic_status"] != "PENDING":
+                raise ContractError("STORED_BATCH_CHANGED")
+            records.append(current)
+        if len({record["candidate"]["checklist_id"] for record in records}) != 1:
+            raise ContractError("STORED_BATCH_CHECKLIST")
+        selection = {"nonce": uuid.uuid4().hex, "items": [self._target(record) for record in records]}
+        selection["batch_binding_digest"] = canonical_digest(selection)
+        self.batch = {"state": "FROZEN", "selection": selection, "decision": None, "error": None,
+                      "items": [{**self._summary(record), "binding_status": "EXACT"} for record in records]}
+        return {"batch_binding_digest": selection["batch_binding_digest"]}
+
+    def _observe_batch(self):
+        items = []
+        for target in self.batch["selection"]["items"]:
+            try:
+                record = self._load(target["run_id"], recover=True)
+                current = self._target(record)
+                same_context = all(current[key] == value for key, value in target.items() if key != "candidate_digest")
+                pending = {**record["candidate"], "semantic_status": "PENDING", "reviewed_by": None,
+                           "reviewed_at": None, "reason": None}
+                binding = ("EXACT" if current == target else "DECIDED"
+                    if same_context and canonical_digest(pending) == target["candidate_digest"]
+                    and record["candidate"]["semantic_status"] != "PENDING" else "CHANGED")
+                items.append({**self._summary(record), "binding_status": binding})
+                self.entries[target["run_id"]] = record
+            except (ContractError, OSError, ValueError) as exc:
+                items.append({"run_id": target["run_id"], "binding_status": "UNAVAILABLE",
+                              "error": getattr(exc, "code", "STORED_REVIEW_UNAVAILABLE")})
+        self.batch = {**self.batch, "items": items}
+
+    def recover_batch(self, payload):
+        # Browser storage carries only a selection descriptor, never a write/retry receipt.
+        selection = payload.get("selection")
+        if (set(payload) != {"selection"} or not isinstance(selection, dict)
+                or set(selection) != {"nonce", "items", "batch_binding_digest"}
+                or not isinstance(selection["nonce"], str) or not SAFE_ID.fullmatch(selection["nonce"])
+                or not isinstance(selection["items"], list) or not 1 <= len(selection["items"]) <= MAX_REVIEW_BATCH
+                or selection["batch_binding_digest"] != canonical_digest({key: selection[key] for key in ("nonce", "items")})):
+            raise ContractError("STORED_BATCH_SELECTION")
+        for item in selection["items"]:
+            if (not isinstance(item, dict) or set(item) != {"run_id", "candidate_digest", "review_context_digest", "ledger_digest", "checklist_id"}
+                    or any(not isinstance(value, str) for value in item.values())
+                    or any(not DIGEST.fullmatch(item[key]) for key in ("candidate_digest", "review_context_digest", "ledger_digest"))
+                    or not SAFE_ID.fullmatch(item["run_id"])):
+                raise ContractError("STORED_BATCH_SELECTION")
+        if len({item["run_id"] for item in selection["items"]}) != len(selection["items"]):
+            raise ContractError("STORED_BATCH_SELECTION")
+        self.close()
+        self.batch = {"state": "RECOVERED", "selection": copy.deepcopy(selection), "decision": None, "error": None}
+        self._observe_batch()
+        self._publish()
+        return {"batch_state": "RECOVERED"}
+
+    def review_batch(self, payload):
+        if (set(payload) != {"batch_binding_digest", "choice", "reason", "excluded_run_ids"}
+                or self.batch is None or self.batch["state"] != "FROZEN"
+                or payload["batch_binding_digest"] != self.batch["selection"]["batch_binding_digest"]):
+            raise ContractError("STORED_BATCH_BINDING")
+        choice, reason, excluded = payload["choice"], payload["reason"], payload["excluded_run_ids"]
+        targets = self.batch["selection"]["items"]
+        run_ids = {item["run_id"] for item in targets}
+        if (choice not in CANDIDATE_REVIEW_CHOICES or choice == "PASS" and reason is not None
+                or choice != "PASS" and reason not in CANDIDATE_REVIEW_REASONS
+                or not isinstance(excluded, list) or any(not isinstance(item, str) for item in excluded)
+                or len(set(excluded)) != len(excluded) or not set(excluded) < run_ids):
+            raise ContractError("STORED_BATCH_CHOICE")
+        self.close()
+        # Reserve once before effects. Recovery never resumes this sequential operation.
+        self.batch = {**self.batch, "state": "APPLYING", "decision": copy.deepcopy(payload)}
+        try:
+            records = []
+            for target in targets:
+                if target["run_id"] in excluded:
+                    continue
+                record = self._load(target["run_id"])
+                if self._target(record) != target or record["candidate"]["semantic_status"] != "PENDING":
+                    raise ContractError("STORED_BATCH_CHANGED")
+                records.append(record)
+            for record in records:
+                port = self._port(record)
+                self._decide(record, port, {"review_binding_digest": port.projection()["review_binding_digest"],
+                                           "choice": choice, "reason": reason})
+            self.batch = {**self.batch, "state": "FINISHED"}
+        except (ContractError, OSError, ValueError) as exc:
+            self.batch = {**self.batch, "state": "INTERRUPTED", "error": getattr(exc, "code", "STORED_BATCH_WRITE_FAILED")}
+        finally:
+            self._observe_batch()
+            if self.selected is not None:
+                self.select(self.selected)
+            self._publish()
+        return {"batch_state": self.batch["state"]}
 
     def _inspection_record(self, payload):
         if (set(payload) != {"review_binding_digest"} or self.port is None

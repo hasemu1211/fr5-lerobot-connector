@@ -524,6 +524,9 @@ class CollectionOperatorApplication:
         if self.stored_reviews is not None:
             handlers.update(refresh_stored_reviews=self.refresh_stored_reviews,
                             select_stored_review=self.select_stored_review,
+                            freeze_review_batch=self.freeze_review_batch,
+                            recover_review_batch=self.recover_review_batch,
+                            review_stored_batch=self.review_stored_batch,
                             inspect_stored_episode=self.inspect_stored_episode,
                             return_stored_review=self.return_stored_review)
         if self.camera_bindings_call is not None:
@@ -1246,6 +1249,11 @@ class CollectionOperatorApplication:
             stored_reviews.update(busy=self._stored_review_busy, error=self._stored_review_error)
             if not self._stored_review_busy:
                 operations.extend(["refresh_stored_reviews", "select_stored_review"])
+                operations.append("recover_review_batch")
+                if self._stored_review_error is None and stored_reviews["status"] == "READY":
+                    operations.append("freeze_review_batch")
+                    if (stored_reviews.get("batch") or {}).get("state") == "FROZEN":
+                        operations.append("review_stored_batch")
             if stored_reviews.get("selected_run_id") is not None:
                 if not self._stored_review_busy and self._stored_review_error is None:
                     if stored_reviews["inspection"]["status"] not in {"PREPARING", "READY"}:
@@ -2439,6 +2447,15 @@ class CollectionOperatorApplication:
 
     def inspect_stored_episode(self, payload, _view):
         return self._stored_review_intent(lambda: self.stored_reviews.inspect(payload))
+
+    def freeze_review_batch(self, payload, _view):
+        return self._stored_review_intent(lambda: self.stored_reviews.freeze_batch(payload))
+
+    def recover_review_batch(self, payload, _view):
+        return self._stored_review_intent(lambda: self.stored_reviews.recover_batch(payload))
+
+    def review_stored_batch(self, payload, _view):
+        return self._stored_review_intent(lambda: self.stored_reviews.review_batch(payload))
 
     def return_stored_review(self, payload, _view):
         return self._stored_review_intent(lambda: self.stored_reviews.return_review(payload))

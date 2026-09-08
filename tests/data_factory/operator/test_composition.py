@@ -3500,7 +3500,7 @@ feedback:
             self.assertIsNone(captured["startup_call"])
             view = captured["view"]
             self.assertEqual(view["runtime"]["workflow_state"], "BLOCKED")
-            self.assertEqual(view["available_ops"], ["refresh_stored_reviews", "select_stored_review"])
+            self.assertEqual(view["available_ops"], ["refresh_stored_reviews", "select_stored_review", "recover_review_batch"])
             self.assertNotIn("authorize_campaign", view["available_ops"])
             self.assertNotIn("recover_home", view["available_ops"])
             self.assertEqual(view["environment"]["components"]["camera"], {
@@ -3648,7 +3648,7 @@ feedback:
                     == f"fr5-up-rgb-30hz-v1@{device}"
                 )
                 self.assertTrue(selected_camera["available"])
-                self.assertEqual(view["available_ops"], ["refresh_stored_reviews", "select_stored_review"])
+                self.assertEqual(view["available_ops"], ["refresh_stored_reviews", "select_stored_review", "recover_review_batch"])
                 self.assertNotIn("authorize_campaign", view["available_ops"])
                 self.assertNotIn("recover_home", view["available_ops"])
                 self.assertFalse((root / "outputs").exists())

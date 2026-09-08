@@ -35,3 +35,9 @@ This change completes one interaction increment. Learning, physical effectivenes
 - [x] Consume Portfolio's installed-viewer render evidence and bind the existing prepared review's frozen episode to native LeRobot/Rerun, without duplicating analysis or admission authority.
 - [x] Implement Web entry/return and one bounded local viewer lifecycle; preserve batch, path binding, approval freshness and lost-response recovery.
 - [x] Verify actual nonterminal frame inspection and same-target return, synthetic stale/missing/unsupported/failure cases, owned cleanup and focused existing review regressions; publish exact evidence to root for integration. Actual frozen episode evidence and immutable cutoffs remain in the existing Orca run; no physical or learning-effect claim follows from inspection.
+
+## 6. Frozen selected semantic review
+
+- [x] Reuse the native per-candidate review and ledger owner for one bounded frozen selection, explicit shared checklist/choice, inspection and individual exclusions.
+- [x] Preserve exact bindings, server reviewer provenance and independent training/physical authority; reconcile partial candidate/ledger publication and process restart without resuming decisions or adding an execution ledger.
+- [x] Verify shipped Web selection/inspection/return and shared decision with native synthetic fixtures, including response loss and per-item recovery; deliver focused checks and immutable cutoff for root integration.

@@ -328,6 +328,31 @@ Physical TEST_COLLECTION SHALL consume the existing canonical robot scene and ce
 - **THEN** production reads respectively the confirmed B source, the confirmed A source, or an unavailable position; it cannot consume the pre-TEST pose as current
 - **AND** manual movement remains an explicit Web declaration through the same scene CAS and server actor; source episodes, reviews and approvals remain immutable, and independent cell readiness and exact-plan gates still apply.
 
+### Requirement: Review a frozen selected set through existing semantic authority
+
+The Collection Web and native client SHALL let a person freeze an explicit set of 1–64 committed pending candidates sharing one native checklist, inspect individual episodes through the existing optional viewer, exclude items and record one displayed common semantic choice and reason. The frozen target SHALL retain each exact candidate, review-context and immutable ledger binding; later inventory additions SHALL NOT join it. Individual differing decisions SHALL remain available through the existing per-candidate review owner. The next consumer is Curator's existing candidate admission, with training authorization still separate.
+
+#### Scenario: One explicit shared decision with individual exceptions
+
+- **WHEN** a person freezes a selected set, inspects an item and returns to review
+- **THEN** the UI preserves the frozen set, shows its checklist, every included/excluded target and the common choice before submission
+- **AND** one semantic intent applies only to included unchanged pending candidates using the existing per-item CAS and server-owned reviewer provenance; an excluded item may instead receive an individual differing decision
+- **AND** no inspector visit, batch completion or semantic PASS grants training or physical authority, and raw episodes remain unchanged.
+
+#### Scenario: Stale or partially recorded batch
+
+- **WHEN** an included target changes before execution, or a candidate/ledger write fails during sequential application
+- **THEN** every included target is revalidated before the first decision, each item is revalidated again at its decision, and processing stops on the first failure
+- **AND** the UI shows current per-item canonical results, distinguishing unavailable or changed bindings from pending or decided items; it does not claim atomic batch success
+- **AND** completed candidates retain their actual reviewer and timestamp, unresolved items receive no inferred decision, and the reserved batch cannot be replayed.
+
+#### Scenario: Lost response or process restart
+
+- **WHEN** the decision response is lost or the operator process restarts after only part of the set was recorded
+- **THEN** the browser reads native state without resending the decision; its locally retained frozen selection descriptor can request observation-only reconciliation through the same native owner
+- **AND** reconciliation may finish the existing canonical ledger projection of an already recorded candidate decision, but never issues, resumes or retries semantic decisions
+- **AND** a recovered set offers per-item results only; another decision requires an explicitly freshly frozen pending selection and choice, without an added acknowledgement phrase or separate approval owner.
+
 ### Requirement: Preserve execution awareness during Collection connection recovery
 
 The Collection Web surface SHALL retain its last validated execution facts and current screen when state retrieval fails, clearly label them as stale, and state that current robot motion or stop is unknown. A failed browser request SHALL NOT imply that the lifecycle owner stopped, rolled back or remains healthy. The current constraint is the existing loopback state/intent transport; this behavior grants no offline command authority and changes no physical or approval gates. The next consumer is the existing lifecycle owner, whose fresh canonical view and exact intent CAS remain authoritative.

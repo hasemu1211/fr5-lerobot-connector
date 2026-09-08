@@ -43,6 +43,13 @@ h2 { margin-bottom: .5rem; font-size: clamp(2rem, 4vw, 3.8rem); line-height: .95
 h3 { margin-bottom: .45rem; font-size: 1.15rem; }
 code { font-family: "SFMono-Regular", Consolas, monospace; overflow-wrap: anywhere; }
 [hidden] { display: none !important; }
+.batch-items { max-height: 22rem; overflow: auto; margin: .8rem 0; }
+.batch-item { display: flex; gap: .8rem; align-items: center; padding: .7rem 0; border-bottom: 1px solid var(--line); }
+.batch-item label { flex: 1; overflow-wrap: anywhere; }
+.batch-item input[type="checkbox"] { width: auto; margin-right: .5rem; }
+.batch-item small { display: block; color: var(--muted); }
+#stored-batch { display: block; margin: 1rem 0; }
+#batch-decision-form { display: grid; gap: .8rem; }
 
 .skip-link { position: fixed; top: -5rem; left: 1rem; z-index: 100; padding: .75rem 1rem; background: var(--ink); color: #fff; }
 .skip-link:focus { top: 1rem; }
