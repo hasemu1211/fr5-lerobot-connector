@@ -24,6 +24,8 @@ python3 docs/portfolio/export_single_file.py .agent-local/portfolio/FR5-Portfoli
 
 모듈 이름은 아키텍처와 본문에서 동일하게 사용한다: Collection Operator, OneJob, Motion Executor, Recorder, Dataset Validator, Curator, Selection, Video Transform, Training Review, Batch Review, NativeInspection, Policy Learning, Training Entrypoint, Split & Normalization. 한국어는 역할과 원리를 설명하는 보조 표현으로 사용하며 원본 코드·측정 자료의 식별자는 바꾸지 않는다.
 
+피드백을 반영할 때는 [OpenSpec의 다섯 편집 원칙](../../openspec/changes/establish-portfolio-proof-loop-intent/specs/portfolio-proof-loop/spec.md#requirement-portfolio-feedback-improves-the-reader-experience-while-preserving-core-value)을 따른다.
+
 첫 화면과 각 기술 구간은 목적을 짧게 전하고 그림·영상·그래프로 원리를 보여 준다. 그림 안에는 대상·관계·축·단위에 필요한 라벨을 남긴다. 같은 원리를 본문·그림·표에서 반복하지 않으며, 계산·실행 조건·근거는 가장 적절한 한 곳에 모아 펼치거나 연결한다. 접힌 내용도 중복을 압축한다. 기대한 효과와 실제 측정 결과를 구분하며, 각 주제에 같은 카드·도해·접기 형식을 강제하지 않는다. 비교 그림은 바뀌는 조건과 고정한 조건을 명시하고, 설명용 표현을 실제 모듈 이름으로 제시하지 않는다. 탐색 검증 통과와 시각적 완성도는 별도로 판단한다. 설명용 물체·형상·조건은 원리의 차이가 잘 드러나도록 선택하고 실물 조건과 구분한다. 조작해도 차이가 읽히지 않는 인터랙션은 나란한 비교로 바꾼다. 같은 카메라 자료도 시연의 전체 동작과 학습 표본의 입출력처럼 서로 다른 설명 책임이 있을 때 사용한다.
 
 전체 아키텍처에서 데이터 피드백과 정책 피드백을 모두 드러낸다. 미완성 연결은 목표 구조에 표시하고 구현·실행 결과와 구분한다. 구현이 덜 됐다는 이유로 폐루프 목적을 선형 수집·학습 파이프라인으로 축소하지 않는다. Acquisition Strategy와 Policy Evaluation은 목표 구조의 기능 책임 이름이며, 같은 이름의 독립 패키지가 존재한다는 뜻은 아니다. 기존 모듈 도해는 수집·학습 구현의 세부 설명으로 보존한다.
