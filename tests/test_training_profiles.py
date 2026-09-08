@@ -63,6 +63,42 @@ class TrainingProfileTest(unittest.TestCase):
             destination_region_id="BLUE", region_binding_active=True)), "pick_place")
 
 
+class NativeImageAugmentationTest(unittest.TestCase):
+    def test_existing_photometric_preset_is_native_train_only_and_accepts_uint8(self):
+        import json
+        from pathlib import Path
+        import draccus
+        import torch
+        from lerobot.datasets import factory
+        from lerobot.transforms.transforms import ImageTransforms, ImageTransformsConfig
+        config = draccus.decode(ImageTransformsConfig, json.loads((Path(__file__).resolve().parents[1]
+            / "config/image_transforms/light-photometric.json").read_text()))
+        cfg = SimpleNamespace(dataset=SimpleNamespace(eval_split=.34, image_transforms=config,
+            repo_id="local/tiny", root=Path("SYNTHETIC_ONLY"), revision=None,
+            video_backend="torchcodec", use_imagenet_stats=False), trainable_config=None, tolerance_s=.0001)
+        full = SimpleNamespace(episodes=[0, 1, 2], meta=SimpleNamespace(episodes={"tasks": [["pickup"]] * 3}))
+        with patch.object(factory, "make_dataset", return_value=full), patch.object(
+                factory, "resolve_delta_timestamps", return_value=None), patch.object(factory, "LeRobotDataset") as ctor:
+            factory.make_train_eval_datasets(cfg)
+        train, development = [call.kwargs for call in ctor.call_args_list]
+        self.assertEqual(train["episodes"], [0])
+        self.assertEqual(development["episodes"], [1, 2])
+        self.assertIsNone(development["image_transforms"])
+        transforms = train["image_transforms"]
+        self.assertIsInstance(transforms, ImageTransforms)
+        self.assertEqual(transforms.tf.n_subset, 2)
+        self.assertNotIn("affine", transforms.transforms)
+        image = torch.arange(3 * 16 * 16).reshape(3, 16, 16).remainder(256).to(torch.uint8)
+        before = image.clone()
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(10)
+            augmented = transforms(image)
+        self.assertEqual(augmented.shape, image.shape)
+        self.assertEqual(augmented.dtype, image.dtype)
+        self.assertFalse(torch.equal(augmented, image))
+        torch.testing.assert_close(image, before)
+
+
 class NativeTrainingConfigurationTest(unittest.TestCase):
     """Exercise installed configuration/scheduler consumers on CPU, without a model or dataset."""
 

@@ -151,6 +151,12 @@ The lane SHALL choose the next safe valuable outcome using code/tests, current a
 - **THEN** the lane reports the exact blocker to root and continues independent scoped software, metadata or research work
 - **AND** it does not fabricate approval, consume gated data, dispatch hardware, or acquire another owner's resources.
 
+#### Scenario: Explicit same-output continuation recovery follows interrupted publication
+- **WHEN** the explicit resume consumer validates a complete continuation checkpoint against current authority and its settled or pending launch manifests
+- **THEN** the native continuation adapter consumes that already admitted receipt, including the pending form, without requiring a second finalized-only receipt read
+- **AND** saved configuration may point to the same output's earlier native checkpoint while original parent lineage, committed cursor, schedule and normalization are revalidated; another output's source is rejected
+- **AND** this explicit recovery does not infer process liveness or issue authority; automatic delegated-request recovery still refuses pending publication.
+
 #### Scenario: A learning result suggests different data or physical testing
 - **WHEN** the next outcome crosses Curator or Rollout ownership
 - **THEN** the lane proposes a bounded input/output evidence contract to the existing owner instead of implementing a competing owner.

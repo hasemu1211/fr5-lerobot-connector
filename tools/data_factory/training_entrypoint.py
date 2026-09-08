@@ -607,7 +607,10 @@ def _run_native_training(argv: list[str], split: dict, receipt: dict) -> int:
             source = (Path(native_options["--config_path"]).parent if same_run
                       else Path(initial["checkpoint"]))
             source_output = source.parent.parent.parent
-            source_receipt = load_json_strict(source_output / "fr5_training_receipt.json")
+            # Same-output recovery already admitted this receipt, including the
+            # pending-manifest form after an interrupted launch publication.
+            source_receipt = (receipt if same_run else
+                              load_json_strict(source_output / "fr5_training_receipt.json"))
             state = continuation_checkpoint_state(source, source_receipt)
             config = options(receipt["normalized_argv"][1:])
             sys.argv = [argv[0], "--resume=true", f"--config_path={source / 'train_config.json'}",

@@ -234,6 +234,120 @@ class NativeContinuationTest(unittest.TestCase):
             _, _, part = self.run_segment(first, first_state, state["schedule"], 9, "eval-final", 2)
         self.assertEqual(actual + part, expected)
 
+    def test_public_same_output_recovery_twice_with_native_saved_sources(self):
+        from tests.test_offline_evaluation import admitted_case
+        from tests.test_train_wrapper import write_normalization_fixture
+        from tools.data_factory.training_entrypoint import prepare_launch, continue_training, resume_training
+        from tools.validate_training_checkpoint import validate_checkpoint
+        from lerobot.configs.default import DatasetConfig
+        from lerobot.configs.train import TrainPipelineConfig
+        from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
+
+        fixture = self.root / "admission"
+        fixture.mkdir()
+        args, split = admitted_case(fixture)
+        base = Path(args.checkpoint)
+        receipt = json.loads((base.parents[2] / "fr5_training_receipt.json").read_text())
+        policy_json = json.loads((base / "config.json").read_text())
+        policy_json.pop("path", None)
+        policy_json.update(type="smolvla", device="cpu", push_to_hub=False)
+        (base / "config.json").write_text(json.dumps(policy_json))
+        save_file({"weight": torch.tensor([.1, -.2])}, base / "model.safetensors")
+        cfg = TrainPipelineConfig(
+            dataset=DatasetConfig(repo_id=args.repo_id, root=args.dataset,
+                                  episodes=split["selected_episodes"], eval_split=split["eval_split"]),
+            policy=SmolVLAConfig.from_pretrained(base), output_dir=self.root / "native-parent",
+            steps=4, batch_size=1, num_workers=0, save_freq=1, eval_steps=4, log_freq=0,
+            rename_map=json.loads(next(x.split("=", 1)[1] for x in receipt["normalized_argv"]
+                                       if x.startswith("--rename_map="))))
+        cfg.policy.pretrained_path = base
+        argv = continuation_argv(base, receipt, output=cfg.output_dir, steps=4,
+                                  batch_size=1, eval_steps=4, save_freq=1, schedule="hold")
+        argv = [arg for arg in argv if not arg.startswith("--fr5.")]
+        argv = ["--policy.path=lerobot/smolvla_base" if arg.startswith("--policy.path=") else arg for arg in argv]
+        split, receipt = prepare_launch(dataset=args.dataset, repo_id=args.repo_id,
+            inventory=args.approved_inventory, profile="smolvla",
+            collection_profile=split["feature_contract"]["collection_profile_id"], argv=argv)
+
+        def dataset(episodes):
+            value = TinyDataset()
+            value.episodes, value.num_episodes, value.num_frames = episodes, len(episodes), 2 * len(episodes)
+            value.meta = SimpleNamespace(episodes={"dataset_from_index": [0, 2, 4, 6],
+                "dataset_to_index": [2, 4, 6, 8]}, has_language_columns=False, camera_keys=[], stats={})
+            value.absolute_to_relative_idx = {2 * episode + offset: 2 * index + offset
+                for index, episode in enumerate(episodes) for offset in range(2)}
+            return value
+
+        class BoundProcessor(IdentityProcessor):
+            def save_pretrained(self, directory):
+                write_normalization_fixture(directory, receipt)
+
+        with patch.object(self.trainer, "make_train_eval_datasets", side_effect=lambda _: (
+                dataset(split["train_episodes"]), dataset(split["eval_episodes"]))), patch.object(
+                self.trainer, "make_pre_post_processors", return_value=(BoundProcessor(), BoundProcessor())):
+            with patch("sys.argv", ["tiny"]):
+                self.trainer.train(cfg)
+            for name, value in (("fr5_training_split.json", split), ("fr5_training_receipt.json", receipt)):
+                (cfg.output_dir / name).write_text(json.dumps(value))
+            parent = cfg.output_dir / "checkpoints/000001/pretrained_model"
+            validate_checkpoint(parent)
+            parent_digest = tree_digest(parent.parent)
+
+            def launch(output):
+                return continue_training(parent, output=output, inventory=args.approved_inventory,
+                    steps=7, batch_size=4, eval_steps=4, save_freq=2, schedule="hold")
+
+            self.trace.clear()
+            reference = self.root / "public-reference"
+            self.assertEqual(launch(reference), 0)
+            expected = copy.deepcopy(self.trace)
+            self.trace.clear()
+            output = self.root / "public-recovered"
+            native_last = self.trainer.update_last_checkpoint
+
+            def interrupt_after_save(checkpoint):
+                native_last(checkpoint)
+                raise InterruptedError("injected interruption after native checkpoint")
+
+            with patch.object(self.trainer, "update_last_checkpoint", side_effect=interrupt_after_save):
+                with self.assertRaises(InterruptedError):
+                    launch(output)
+            first = output / "checkpoints/000002/pretrained_model"
+            first_digest = tree_digest(first.parent)
+            # Simulate abrupt termination before launch's finally published manifests.
+            for name in ("fr5_training_split.json", "fr5_training_receipt.json"):
+                (output / name).rename(Path(str(output) + f".{name}.pending"))
+            with patch.object(self.trainer, "update_last_checkpoint", side_effect=interrupt_after_save):
+                with self.assertRaises(InterruptedError):
+                    resume_training(first)
+            second = output / "checkpoints/000004/pretrained_model"
+            self.assertEqual(json.loads((second / "train_config.json").read_text())["policy"]["pretrained_path"], str(first))
+            validate_checkpoint(second)
+            second_digest = tree_digest(second.parent)
+            self.assertEqual(resume_training(second), 0)
+            final = output / "checkpoints/000007/pretrained_model"
+            validate_checkpoint(final)
+            self.assertEqual(self.trace, expected)
+            self.assertEqual(tree_digest(parent.parent), parent_digest)
+            self.assertEqual(tree_digest(first.parent), first_digest)
+            self.assertEqual(tree_digest(second.parent), second_digest)
+            for filename in ("optimizer_state.safetensors", "rng_state.safetensors"):
+                expected_tensors = load_file(reference / "checkpoints/000007/training_state" / filename)
+                actual_tensors = load_file(final.parent / "training_state" / filename)
+                for key in expected_tensors:
+                    torch.testing.assert_close(actual_tensors[key], expected_tensors[key], rtol=0, atol=0)
+            for filename in ("scheduler_state.json", CONTINUATION_STATE):
+                self.assertEqual(json.loads((reference / "checkpoints/000007/training_state" / filename).read_text()),
+                                 json.loads((final.parent / "training_state" / filename).read_text()))
+            config_file = final / "train_config.json"
+            saved = json.loads(config_file.read_text())
+            self.assertTrue(saved["resume"])
+            self.assertEqual(saved["policy"]["pretrained_path"], str(second))
+            saved["policy"]["pretrained_path"] = str(reference / "checkpoints/000004/pretrained_model")
+            config_file.write_text(json.dumps(saved))
+            with self.assertRaisesRegex(ValueError, "source differs from lineage"):
+                validate_checkpoint(final)
+
 
 class ContinuationCursorTest(unittest.TestCase):
     def test_cursor_counts_committed_partial_batches_after_batch_change(self):
