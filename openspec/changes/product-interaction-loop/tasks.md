@@ -41,3 +41,9 @@ This change completes one interaction increment. Learning, physical effectivenes
 - [x] Reuse the native per-candidate review and ledger owner for one bounded frozen selection, explicit shared checklist/choice, inspection and individual exclusions.
 - [x] Preserve exact bindings, server reviewer provenance and independent training/physical authority; reconcile partial candidate/ledger publication and process restart without resuming decisions or adding an execution ledger.
 - [x] Verify shipped Web selection/inspection/return and shared decision with native synthetic fixtures, including response loss and per-item recovery; deliver focused checks and immutable cutoff for root integration.
+
+## 7. Reviewed selection to native Curator request
+
+- [x] Reuse the stored selection and native Curator exporter with exact candidate/context/ledger bindings and server-owned request paths; preserve separate authority and reject ineligible or mixed inputs without filtering.
+- [x] Resolve the same selection to the existing native request, with observation-only restart recovery and honest changed/conflicting output; no new publication ledger or polling hashes.
+- [x] Verify native composition, current-source rejection and browser selection/response-loss recovery on synthetic inputs; hand off immutable source and focused evidence to root for native Curator consumption.

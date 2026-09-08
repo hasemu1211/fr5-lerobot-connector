@@ -25,7 +25,7 @@ MAX_REVIEW_BATCH = 64
 
 
 class StoredCandidateReviews:
-    def __init__(self, run_root, *, operator_label, clock=None, inspection=None):
+    def __init__(self, run_root, *, operator_label, clock=None, inspection=None, request_root=None):
         self.root = Path(run_root).absolute()
         self.operator_label = operator_label
         self.clock = clock or (lambda: datetime.now(timezone.utc))
@@ -33,6 +33,8 @@ class StoredCandidateReviews:
         self.selected = None
         self.port = None
         self.batch = None
+        self.request_root = None if request_root is None else Path(request_root).absolute()
+        self.curator_request = None
         self.inspector = inspection if inspection is not None else NativeInspection(video_only=True)
         self.inspection = {"status": "CLOSED", "target": None}
         self.inspection_dataset = None
@@ -49,7 +51,8 @@ class StoredCandidateReviews:
             inspection = {**inspection, **self.inspector.snapshot()}
         return {**copy.deepcopy(self.public), "inspection": copy.deepcopy(inspection),
                 "batch": copy.deepcopy(self.batch), "batch_limit": MAX_REVIEW_BATCH,
-                "review_reasons": list(CANDIDATE_REVIEW_REASONS)}
+                "review_reasons": list(CANDIDATE_REVIEW_REASONS),
+                "curator_request": copy.deepcopy(self.curator_request)}
 
     def _paths(self, run_id):
         if not isinstance(run_id, str) or run_id in {".", ".."} or not SAFE_ID.fullmatch(run_id):
@@ -103,6 +106,7 @@ class StoredCandidateReviews:
             instruction = validate_episode_instruction_binding(instruction)
         return {"candidate": candidate, "reference": reference, "path": candidate_path,
                 "dataset": ledger["dataset"], "locator": ledger["episode"]["lerobot_v3_locator"],
+                "technical_path": ledger["artifacts"]["technical"]["artifact_path"],
                 "instruction": instruction,
                 "episode_index": ledger["episode"]["episode_index"]}
 
@@ -112,6 +116,7 @@ class StoredCandidateReviews:
         instruction = record["instruction"]
         task = None if instruction is None else instruction["task_binding"]
         return {"run_id": candidate["run_id"], "episode_index": record["episode_index"],
+                "selection_digest": canonical_digest(StoredCandidateReviews._target(record)),
                 "task_id": None if task is None else task["task_id"],
                 "instruction": None if instruction is None else instruction["instruction"],
                 "spatial_roles": [] if task is None else [
@@ -321,6 +326,87 @@ class StoredCandidateReviews:
         if current != self.entries[self.selected]:
             raise ContractError("INSPECTION_TARGET_CHANGED")
         return current
+
+    def export_request(self, payload, *, recover=False):
+        """Consume Curator's request producer; recovery never publishes a request."""
+        from tools.data_factory.curator.workflow.selection import export_training_request
+        from tools.data_factory.curator.core.errors import CuratorError
+        from tools.data_factory.curator.core.filesystem import reject_symlink_components
+        from tools.data_factory.training_entrypoint import prepare_approvals
+
+        items = payload.get("items")
+        if (self.request_root is None or set(payload) != {"items"} or not isinstance(items, list)
+                or not 1 <= len(items) <= MAX_REVIEW_BATCH):
+            raise ContractError("CURATOR_REQUEST_SELECTION")
+        for item in items:
+            if (not isinstance(item, dict) or set(item) != {"run_id", "selection_digest"}
+                    or not isinstance(item["run_id"], str) or not SAFE_ID.fullmatch(item["run_id"])
+                    or not isinstance(item["selection_digest"], str) or not DIGEST.fullmatch(item["selection_digest"])):
+                raise ContractError("CURATOR_REQUEST_SELECTION")
+        if len({item["run_id"] for item in items}) != len(items):
+            raise ContractError("CURATOR_REQUEST_SELECTION")
+        items = sorted(copy.deepcopy(items), key=lambda item: item["run_id"])
+        request_id = "selection-" + canonical_digest(items)[7:]
+        self.curator_request = {"status": "CHECKING", "request_id": request_id, "selection": {"items": items},
+                                "publication": "UNKNOWN", "training_authority": False, "error": None}
+        target = None
+        descriptors = []
+        try:
+            root = reject_symlink_components(self.request_root, "CURATOR_REQUEST_PATH")
+            target = reject_symlink_components(root / f"{request_id}.json", "CURATOR_REQUEST_PATH")
+            records = []
+            for item in items:
+                # Share the canonical review owner's directory lock until publication:
+                # a pending review cannot become PASS between selection CAS and export.
+                directory = self._paths(item["run_id"])[0].parent
+                descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                descriptors.append(descriptor)
+                fcntl.flock(descriptor, fcntl.LOCK_SH)
+                record = self._load(item["run_id"])
+                if canonical_digest(self._target(record)) != item["selection_digest"]:
+                    raise ContractError("CURATOR_REQUEST_SELECTION_CHANGED")
+                records.append(record)
+            if root.is_relative_to(self.root) or any(root.is_relative_to(Path(record["dataset"]["dataset_root"]).resolve()) for record in records):
+                raise ContractError("CURATOR_REQUEST_PATH")
+            published = target.exists()
+            if not published and not recover:
+                root.mkdir(parents=True, exist_ok=True)
+                try:
+                    export_training_request([record["path"].parent for record in records], target, dataset_id=request_id)
+                except (CuratorError, OSError):
+                    # Publication may have landed before a response/flush error.
+                    # Reopen only this deterministic exact target; never issue a second export.
+                    if not target.is_file():
+                        raise
+                    published = True
+            if not target.is_file():
+                self.curator_request.update(status="NOT_PUBLISHED", publication="ABSENT")
+                return {"curator_request_status": "NOT_PUBLISHED"}
+            request = load_json_strict(target)
+            source = records[0]["dataset"]
+            expected = {(r["candidate"]["run_id"], r["episode_index"], str(r["path"].parent / "episode_ledger.json"), str(r["path"]), r["technical_path"]) for r in records}
+            actual = {(e["episode_id"], e["episode_index"], e["episode_ledger_path"], e["human_semantic_evidence_path"], e["technical_validator_path"]) for e in request["episodes"]}
+            if (set(request) != {"dataset_id", "dataset_root", "repo_id", "episodes"}
+                    or request["dataset_id"] != request_id or request["dataset_root"] != source["dataset_root"]
+                    or request["repo_id"] != source["repo_id"] or actual != expected or len(request["episodes"]) != len(records)):
+                raise ContractError("CURATOR_REQUEST_OUTPUT_CHANGED")
+            if published:
+                # Existing request is not evidence that its current source is still eligible.
+                prepare_approvals(request, root, "curator-preview-only")
+            for item in items:
+                if canonical_digest(self._target(self._load(item["run_id"]))) != item["selection_digest"]:
+                    raise ContractError("CURATOR_REQUEST_SELECTION_CHANGED")
+            self.curator_request.update(status="REQUEST_NOT_APPROVED", publication="PRESENT",
+                request_digest=canonical_digest(request), dataset_id=request_id,
+                episodes=[self._summary(record) for record in records],
+                episode_indices=[episode["episode_index"] for episode in request["episodes"]])
+        except (ContractError, CuratorError, OSError, ValueError, KeyError, TypeError) as exc:
+            self.curator_request.update(status="UNAVAILABLE", error=getattr(exc, "code", "CURATOR_REQUEST_IO"),
+                publication="PRESENT" if target is not None and target.is_file() else "UNKNOWN")
+        finally:
+            for descriptor in reversed(descriptors):
+                os.close(descriptor)
+        return {"curator_request_status": self.curator_request["status"]}
 
     def inspect(self, payload):
         record = self._inspection_record(payload)

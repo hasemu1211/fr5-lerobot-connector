@@ -353,6 +353,25 @@ The Collection Web and native client SHALL let a person freeze an explicit set o
 - **AND** reconciliation may finish the existing canonical ledger projection of an already recorded candidate decision, but never issues, resumes or retries semantic decisions
 - **AND** a recovered set offers per-item results only; another decision requires an explicitly freshly frozen pending selection and choice, without an added acknowledgement phrase or separate approval owner.
 
+### Requirement: Explicit reviewed selection becomes a native Curator input request
+
+The Collection Web surface SHALL let the person choose an exact bounded set of stored committed episodes and explicitly publish its input request through the existing native Curator exporter. The existing candidate, context and ledger bindings SHALL define that selection; server-owned paths SHALL be resolved without browser path or digest transcription. The next consumer is native Curator request processing, with semantic, processing, training and physical authority remaining separate.
+
+#### Scenario: Eligible explicit selection
+
+- **WHEN** the person selects one to sixty-four stored episodes and requests Curator input
+- **THEN** the existing native exporter revalidates their current source and semantic eligibility and publishes only that exact set as `REQUEST_NOT_APPROVED`
+- **AND** the Web result identifies the selected episodes and original reviewers without changing raw episodes, candidate decisions, ledgers or approvals
+- **AND** selection validation through publication shares the existing candidate-review directory lock, so a concurrent semantic decision cannot change the selected binding in that interval; operator state reads and stop remain independent
+- **AND** pending, failed, mixed-dataset or changed selections are rejected honestly, never silently filtered or converted into successful requests; a historical append-prefix ledger digest is not required to equal the current dataset tree digest.
+
+#### Scenario: Recover publication without repeated effects
+
+- **WHEN** a response is lost, the process restarts, or the same exact selection is explicitly requested again
+- **THEN** the server identifies the deterministic native request and reopens its exact selected sources before reporting current eligibility; the browser automatically reads state only and never replays publication
+- **AND** explicit recovery of the retained selection never creates a missing request, while an existing conflicting or no-longer-eligible request is preserved and shown as unavailable rather than overwritten
+- **AND** cached views are last-checked observations: polling does not rehash datasets, grant approval or launch Curator or training, and the next native consumer must validate its current inputs again.
+
 ### Requirement: Preserve execution awareness during Collection connection recovery
 
 The Collection Web surface SHALL retain its last validated execution facts and current screen when state retrieval fails, clearly label them as stale, and state that current robot motion or stop is unknown. A failed browser request SHALL NOT imply that the lifecycle owner stopped, rolled back or remains healthy. The current constraint is the existing loopback state/intent transport; this behavior grants no offline command authority and changes no physical or approval gates. The next consumer is the existing lifecycle owner, whose fresh canonical view and exact intent CAS remain authoritative.

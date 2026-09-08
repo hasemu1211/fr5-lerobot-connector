@@ -4415,7 +4415,8 @@ def build_physical_operator_application(
         initial_environment=initial_environment,
         effect_scope="PHYSICAL",
         stored_reviews=StoredCandidateReviews(repository / "outputs/data_factory/runs",
-                                             operator_label=operator_label, clock=clock),
+                                             operator_label=operator_label, clock=clock,
+                                             request_root=repository / "outputs/curator/requests"),
         object_position_call=object_position_call,
         object_position_declare_call=object_position_declare_call,
     )

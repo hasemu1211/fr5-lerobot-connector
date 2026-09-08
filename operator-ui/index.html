@@ -226,14 +226,16 @@
           <p id="stored-review-status" role="status"></p>
         </div>
         <section id="stored-batch" class="review-card" hidden aria-labelledby="stored-batch-title">
-          <h3 id="stored-batch-title">선택한 에피소드 함께 분류</h3>
+          <h3 id="stored-batch-title">에피소드 선택·분류</h3>
           <p>같은 체크리스트로 판단할 항목만 고정하세요. 각 영상을 열어볼 수 있으며, 다른 판단이 필요한 항목은 제외한 뒤 개별 분류할 수 있습니다.</p>
           <details><summary>대상 선택</summary>
             <label for="batch-checklist">공통 체크리스트<select id="batch-checklist"></select></label>
             <button id="batch-select-pending" type="button" class="secondary-button">이 체크리스트의 대기 항목 선택</button>
+            <button id="request-select-pass" type="button" class="secondary-button">사용 후보 선택 (최대 64개)</button>
             <button id="batch-clear-selection" type="button" class="secondary-button">선택 해제</button>
             <div id="batch-selection-list" class="batch-items"></div>
             <button id="freeze-review-batch" type="button">선택 집합 고정</button>
+            <button id="export-curator-request" type="button" class="secondary-button">선택한 항목으로 Curator 입력 요청 만들기</button>
           </details>
           <p id="batch-status" role="status"></p>
           <button id="recover-review-batch" type="button" class="secondary-button" hidden>저장된 선택 집합의 현재 결과 확인</button>
@@ -248,6 +250,13 @@
             <button id="apply-review-batch" type="submit">선택한 공통 판정 기록</button>
           </form>
           <p class="cell-help">항목별로 순서대로 기록하며 오류가 나면 멈춥니다. 전체 원자적 성공을 보장하지 않으며, 재접속 시 결과만 확인하고 판정을 재전송하지 않습니다. 원본 보존·학습 승인·로봇 실행은 바꾸지 않습니다.</p>
+        </section>
+        <section id="curator-request-panel" class="notice" hidden aria-labelledby="curator-request-title">
+          <h3 id="curator-request-title">선택한 원본의 Curator 입력 요청</h3>
+          <p id="curator-request-status" role="status"></p>
+          <ul id="curator-request-episodes"></ul>
+          <button id="recover-curator-request" type="button" class="secondary-button">이 요청의 현재 근거 다시 확인</button>
+          <p>여기서는 요청만 만듭니다. 가공·학습을 시작하거나 사용을 승인하지 않습니다. 아래 결과는 마지막 확인 시점의 상태이며, 다음 소비자가 원본과 판정을 다시 검증합니다.</p>
         </section>
         <div id="stored-inspection" class="notice" hidden>
           <p id="stored-inspection-status" role="status"></p>

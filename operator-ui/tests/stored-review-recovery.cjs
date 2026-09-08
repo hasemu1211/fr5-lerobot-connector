@@ -51,11 +51,21 @@ const {randomUUID} = require("node:crypto");
   if (mode === "return") await vm.runInContext("submitIntent('inspect_stored_episode', {review_binding_digest:currentView.candidate_review.review_binding_digest})", context);
   methods.length = 0;
   drop = true;
-  if (mode === "batch") await vm.runInContext("submitIntent('review_stored_batch', {batch_binding_digest:currentView.stored_reviews.batch.selection.batch_binding_digest,choice:'PASS',reason:null,excluded_run_ids:[]})", context);
+  if (mode === "request") await vm.runInContext("submitIntent('export_curator_request', {items:currentView.stored_reviews.episodes.map(({run_id,selection_digest})=>({run_id,selection_digest}))})", context);
+  else if (mode === "batch") await vm.runInContext("submitIntent('review_stored_batch', {batch_binding_digest:currentView.stored_reviews.batch.selection.batch_binding_digest,choice:'PASS',reason:null,excluded_run_ids:[]})", context);
   else if (mode === "review") await vm.runInContext("submitIntent('review_candidate', {review_binding_digest:currentView.candidate_review.review_binding_digest,choice:'PASS',reason:null})", context);
   else await vm.runInContext(`submitIntent('${mode === "return" ? "return_stored_review" : "inspect_stored_episode"}', {review_binding_digest:currentView.candidate_review.review_binding_digest})`, context);
-  console.log(JSON.stringify({methods, review: vm.runInContext("currentView.candidate_review", context),
+  let previousRequestHidden = null;
+  if (mode === "request") {
+    vm.runInContext("savedRequestSelection={items:[{run_id:'newer-unsent-selection',selection_digest:'sha256:'+'0'.repeat(64)}]}; renderCuratorRequest(currentView)", context);
+    previousRequestHidden = !node("#curator-request-status").textContent.includes("입력 요청이 생성됐습니다")
+      && node("#curator-request-episodes").innerHTML.includes("newer-unsent-selection");
+    vm.runInContext("savedRequestSelection=null; renderCuratorRequest(currentView)", context);
+  }
+  console.log(JSON.stringify({methods, previousRequestHidden, review: vm.runInContext("currentView.candidate_review", context),
     inspection: vm.runInContext("currentView.stored_reviews.inspection", context),
+    request: vm.runInContext("currentView.stored_reviews.curator_request", context),
+    requestCard: node("#curator-request-episodes").innerHTML,
     batch: vm.runInContext("currentView.stored_reviews.batch", context),
     batchCard: node("#batch-frozen-items").innerHTML,
     card: node("#review-queue").innerHTML}));

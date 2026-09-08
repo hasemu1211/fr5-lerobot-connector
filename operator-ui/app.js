@@ -61,6 +61,11 @@ try { savedBatchSelection = JSON.parse(globalThis.localStorage?.getItem(BATCH_ST
 let batchDraft = new Set();
 let batchExcluded = new Set();
 let batchRenderBinding = null;
+const REQUEST_STORAGE_KEY = "fr5-curator-request-selection-v1";
+let savedRequestSelection = null;
+try { savedRequestSelection = JSON.parse(globalThis.localStorage?.getItem(REQUEST_STORAGE_KEY) ?? "null"); } catch (_) {}
+if (!Array.isArray(savedRequestSelection?.items) || !savedRequestSelection.items.length || savedRequestSelection.items.length > 64
+  || savedRequestSelection.items.some(item => typeof item?.run_id !== "string" || typeof item?.selection_digest !== "string")) savedRequestSelection = null;
 
 const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (character) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -1724,6 +1729,7 @@ function renderStoredInspection(view) {
 function renderResults(view) {
   renderStoredInspection(view);
   renderStoredBatch(view);
+  renderCuratorRequest(view);
   const stored = view.stored_reviews;
   const storedControls = document.querySelector("#stored-review-controls");
   if (storedControls) {
@@ -1834,10 +1840,11 @@ function renderStoredBatch(view) {
   document.querySelector("#batch-select-pending").disabled = !editable;
   document.querySelector("#batch-clear-selection").disabled = !editable;
   const list = document.querySelector("#batch-selection-list");
-  const listing = stored.episodes.map(item => `<div class="batch-item"><label><input type="checkbox" data-batch-select="${escapeHtml(item.run_id)}" ${batchDraft.has(item.run_id) ? "checked" : ""} ${editable && item.status === "PENDING" ? "" : "disabled"}>#${item.episode_index} · ${escapeHtml(item.task_id ?? item.checklist_id)} · ${escapeHtml(semanticReviewLabel(item.status))}<small>${escapeHtml(item.run_id)}</small></label></div>`).join("");
+  const listing = stored.episodes.map(item => `<div class="batch-item"><label><input type="checkbox" data-batch-select="${escapeHtml(item.run_id)}" ${batchDraft.has(item.run_id) ? "checked" : ""} ${editable ? "" : "disabled"}>#${item.episode_index} · ${escapeHtml(item.task_id ?? item.checklist_id)} · ${escapeHtml(semanticReviewLabel(item.status))}<small>${escapeHtml(item.run_id)}</small></label></div>`).join("");
   if (list.dataset.content !== listing) { list.innerHTML = listing; list.dataset.content = listing; }
   const freeze = document.querySelector("#freeze-review-batch");
-  freeze.disabled = !editable || !batchDraft.size || batchDraft.size > stored.batch_limit;
+  freeze.disabled = !editable || !batchDraft.size || batchDraft.size > stored.batch_limit
+    || [...batchDraft].some(id => stored.episodes.find(item => item.run_id === id)?.status !== "PENDING");
   freeze.textContent = `선택 ${batchDraft.size}개 고정 (최대 ${stored.batch_limit})`;
   const recover = document.querySelector("#recover-review-batch");
   recover.hidden = !savedBatchSelection;
@@ -1867,6 +1874,28 @@ function renderStoredBatch(view) {
     document.querySelector("#batch-decision-summary").textContent = `고정 ${batch.items.length}개 중 포함 ${count}개 → ${choice ? semanticReviewLabel(choice) : "판정 미선택"}${choice && choice !== "PASS" && reason.value ? ` · ${message("review_reason", reason.value)}` : ""}. 제외 ${batchExcluded.size}개에는 이 판정을 기록하지 않습니다.`;
     document.querySelector("#apply-review-batch").disabled = !canIntent("review_stored_batch") || !count || !choice || choice !== "PASS" && !reason.value;
   }
+}
+
+function renderCuratorRequest(view) {
+  const stored = view.stored_reviews;
+  const panel = document.querySelector("#curator-request-panel");
+  if (!panel) return;
+  const observed = stored?.curator_request;
+  // A lost newer request must not display an older successful selection as its result.
+  const request = savedRequestSelection && observed && (savedRequestSelection.items.length !== observed.selection.items.length
+    || savedRequestSelection.items.some(item => !observed.selection.items.some(value => value.run_id === item.run_id && value.selection_digest === item.selection_digest))) ? null : observed;
+  document.querySelector("#request-select-pass").disabled = !canIntent("export_curator_request");
+  const create = document.querySelector("#export-curator-request");
+  create.disabled = !canIntent("export_curator_request") || !batchDraft.size || batchDraft.size > (stored?.batch_limit ?? 0);
+  create.textContent = `선택 ${batchDraft.size}개로 Curator 입력 요청 만들기`;
+  panel.hidden = !request && !savedRequestSelection;
+  document.querySelector("#recover-curator-request").disabled = !(request?.selection ?? savedRequestSelection) || !canIntent("recover_curator_request");
+  const labels = {CHECKING: "현재 원본과 판정을 검증 중입니다.", REQUEST_NOT_APPROVED: "입력 요청이 생성됐습니다. 가공·학습 승인은 없습니다.", NOT_PUBLISHED: "이 선택으로 생성된 요청이 없습니다. 복구는 새 요청을 만들지 않습니다.", UNAVAILABLE: "요청을 현재 사용 가능하다고 확인하지 못했습니다. 선택과 근거를 다시 확인하세요."};
+  document.querySelector("#curator-request-status").textContent = request
+    ? `${labels[request.status] ?? request.status}${request.error ? ` (${request.error})` : ""} · ${request.request_id}${request.publication === "PRESENT" && request.status !== "REQUEST_NOT_APPROVED" ? " · 기존 요청 파일은 보존됨" : ""}`
+    : "이 브라우저에 이전 요청의 선택이 남아 있습니다. 현재 근거를 다시 확인할 수 있습니다.";
+  document.querySelector("#curator-request-episodes").innerHTML = (request?.episodes ?? request?.selection?.items ?? savedRequestSelection?.items ?? []).map(item =>
+    `<li>${Number.isInteger(item.episode_index) ? `#${item.episode_index} · ` : ""}${escapeHtml(item.run_id)}${item.reviewed_by ? ` · ${escapeHtml(item.reviewed_by)}` : ""}</li>`).join("");
 }
 
 function renderNext(view) {
@@ -2371,11 +2400,28 @@ document.querySelector("#batch-select-pending")?.addEventListener("click", () =>
   const checklist = document.querySelector("#batch-checklist").value;
   batchDraft = new Set(currentView.stored_reviews.episodes.filter(item => item.status === "PENDING" && item.checklist_id === checklist).slice(0, currentView.stored_reviews.batch_limit).map(item => item.run_id));
   renderStoredBatch(currentView);
+  renderCuratorRequest(currentView);
 });
-document.querySelector("#batch-clear-selection")?.addEventListener("click", () => { batchDraft.clear(); renderStoredBatch(currentView); });
+document.querySelector("#request-select-pass")?.addEventListener("click", () => {
+  batchDraft = new Set(currentView.stored_reviews.episodes.filter(item => item.status === "PASS").slice(0, currentView.stored_reviews.batch_limit).map(item => item.run_id));
+  renderStoredBatch(currentView); renderCuratorRequest(currentView);
+});
+document.querySelector("#batch-clear-selection")?.addEventListener("click", () => { batchDraft.clear(); renderStoredBatch(currentView); renderCuratorRequest(currentView); });
 document.querySelector("#batch-selection-list")?.addEventListener("change", (event) => {
   const id = event.target.dataset.batchSelect;
-  if (id) { event.target.checked ? batchDraft.add(id) : batchDraft.delete(id); renderStoredBatch(currentView); }
+  if (id) { event.target.checked ? batchDraft.add(id) : batchDraft.delete(id); renderStoredBatch(currentView); renderCuratorRequest(currentView); }
+});
+document.querySelector("#export-curator-request")?.addEventListener("click", async () => {
+  const selected = [...batchDraft].map(id => currentView.stored_reviews.episodes.find(item => item.run_id === id));
+  if (selected.some(item => !item)) return;
+  savedRequestSelection = {items: selected.map(item => ({run_id: item.run_id, selection_digest: item.selection_digest}))};
+  try { globalThis.localStorage?.setItem(REQUEST_STORAGE_KEY, JSON.stringify(savedRequestSelection)); } catch (_) {}
+  await submitIntent("export_curator_request", savedRequestSelection);
+  document.querySelector("#curator-request-panel")?.scrollIntoView({block: "center"});
+});
+document.querySelector("#recover-curator-request")?.addEventListener("click", () => {
+  const selection = savedRequestSelection ?? currentView?.stored_reviews?.curator_request?.selection;
+  if (selection) submitIntent("recover_curator_request", selection);
 });
 document.querySelector("#freeze-review-batch")?.addEventListener("click", () => submitIntent("freeze_review_batch", {run_ids: [...batchDraft]}));
 document.querySelector("#recover-review-batch")?.addEventListener("click", () => {

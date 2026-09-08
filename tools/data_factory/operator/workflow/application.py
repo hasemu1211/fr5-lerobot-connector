@@ -527,6 +527,8 @@ class CollectionOperatorApplication:
                             freeze_review_batch=self.freeze_review_batch,
                             recover_review_batch=self.recover_review_batch,
                             review_stored_batch=self.review_stored_batch,
+                            export_curator_request=self.export_curator_request,
+                            recover_curator_request=self.recover_curator_request,
                             inspect_stored_episode=self.inspect_stored_episode,
                             return_stored_review=self.return_stored_review)
         if self.camera_bindings_call is not None:
@@ -1250,8 +1252,12 @@ class CollectionOperatorApplication:
             if not self._stored_review_busy:
                 operations.extend(["refresh_stored_reviews", "select_stored_review"])
                 operations.append("recover_review_batch")
+                if self.stored_reviews.request_root is not None:
+                    operations.append("recover_curator_request")
                 if self._stored_review_error is None and stored_reviews["status"] == "READY":
                     operations.append("freeze_review_batch")
+                    if self.stored_reviews.request_root is not None:
+                        operations.append("export_curator_request")
                     if (stored_reviews.get("batch") or {}).get("state") == "FROZEN":
                         operations.append("review_stored_batch")
             if stored_reviews.get("selected_run_id") is not None:
@@ -2456,6 +2462,12 @@ class CollectionOperatorApplication:
 
     def review_stored_batch(self, payload, _view):
         return self._stored_review_intent(lambda: self.stored_reviews.review_batch(payload))
+
+    def export_curator_request(self, payload, _view):
+        return self._stored_review_intent(lambda: self.stored_reviews.export_request(payload))
+
+    def recover_curator_request(self, payload, _view):
+        return self._stored_review_intent(lambda: self.stored_reviews.export_request(payload, recover=True))
 
     def return_stored_review(self, payload, _view):
         return self._stored_review_intent(lambda: self.stored_reviews.return_review(payload))
