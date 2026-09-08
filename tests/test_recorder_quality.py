@@ -442,6 +442,8 @@ class RecorderContractTest(unittest.TestCase):
             "fairino_hardware_v3_9_7/include/fairino_hardware/fairino_hardware_interface.hpp",
             "fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp",
             "fairino_hardware_v3_9_7/include/fairino_hardware/gripper_execution_evidence.hpp",
+            "fairino_hardware_v3_9_7/include/fairino_hardware/precise_controller_clock.hpp",
+            "fairino_hardware_v3_9_7/CMakeLists.txt",
         ])
         pinned = subprocess.check_output(
             ["git", "ls-tree", "HEAD", "src/frcobot_ros2"], cwd=root, text=True
