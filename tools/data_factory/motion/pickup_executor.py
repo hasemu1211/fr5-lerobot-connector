@@ -1056,7 +1056,10 @@ class PickupExecutor:
                 observed = self.transport.snapshot(run["plan"]["planning"]["max_joint_state_age_s"])
                 if _gripper_settings(observed["gripper_settings"]) != run["plan"]["active_gripper_settings"]:
                     raise ContractError("GRIPPER_SETTINGS_MISMATCH")
-                contact = capture(copy.deepcopy(run["plan"]), copy.deepcopy(run["execution"]["scene_object"]), observed)
+                options = {}
+                if run["execution"].get("prospective_contact", {}).get("status") == "PROSPECTIVE":
+                    options["prospective"] = copy.deepcopy(run["execution"]["prospective_contact"])
+                contact = capture(copy.deepcopy(run["plan"]), copy.deepcopy(run["execution"]["scene_object"]), observed, **options)
                 run["mechanical_contact_diagnostic"] = copy.deepcopy(contact)
                 if contact.get("status") == "AVAILABLE":
                     until=contact.get("valid_until_s")
@@ -1434,6 +1437,8 @@ class PickupExecutor:
             elif self._phase_event_writer.ready:
                 execution["behavior_report_status"] = "AVAILABLE"
         data = {key: copy.deepcopy(execution.get(key)) for key in ("step_index", "grasp_verdict", "semantic_verdict", "release_verdict", "precontact_confirmation", "grasp_decision", "semantic_decision", "release_decision", "gripper_feedback_m", "gripper_reference_m", "post_lift_gripper_feedback_m", "release_evidence", "scene_transition", "snapshot", "snapshot_error", "cancel_error", "durable_blocked", "cell_state_error", "scene_state_error", "phase_events_path", "behavior_report_status") if key in execution}
+        if "prospective_contact" in execution:
+            data["prospective_contact"] = copy.deepcopy(execution["prospective_contact"])
         if run.get("recycle_plan_digest") is not None:
             data["recycle_plan_digest"] = run["recycle_plan_digest"]
         if "learned_proposal" in run["plan"]:
@@ -1647,6 +1652,30 @@ class PickupExecutor:
                     resolved_step = execution_step(step, run["plan"]["learned_proposal"])
                     check_execution_start(resolved_step, evidence, self.source_clock(), steady_now=self.monotonic_clock())
                     execution["learned_start_observation"] = evidence
+                    if "task_grant" in run and hasattr(self.transport, "prepare_contact_transition"):
+                        if "prospective_contact" not in execution:
+                            execution["prospective_contact"] = self.transport.prepare_contact_transition(
+                                run["plan"], execution["scene_object"],
+                                first=not run.get("learned_history") and not execution.get("learned_segments"),
+                                deadline_s=run["task_grant"]["deadline_s"])
+                        context = execution["prospective_contact"]
+                        if context.get("status") == "PROSPECTIVE":
+                            from tools.data_factory.motion.contact_transition import before
+                            execution["contact_pending"] = before(self.transport, run["plan"], step, evidence, context)
+                            # Native profile/FK/collision work can exceed the
+                            # observation age budget. Read new controller data;
+                            # never restamp the sample used for planning checks.
+                            fresh = {"snapshot": self.transport.snapshot(run["plan"]["planning"]["max_joint_state_age_s"]),
+                                     "captured_at_s": self.source_clock(), "captured_monotonic_s": self.monotonic_clock()}
+                            from tools.data_factory.rollout.gripper_evidence import check_transition
+                            check_transition(evidence, fresh, command=False)
+                            check_execution_start(resolved_step, fresh, self.source_clock(), steady_now=self.monotonic_clock())
+                            if any(abs(a-b) > tolerance for a,b in zip(observed["joint_positions"], fresh["snapshot"]["joint_positions"])):
+                                raise ContractError("CONTACT_CHECK_MOVED_ARM")
+                            execution["contact_pending"]["checked_start_observation"] = evidence
+                            execution["contact_pending"]["start_observation"] = fresh
+                            evidence = fresh
+                            execution["learned_start_observation"] = fresh
                     options = {"start_observation": evidence}
                     if "action_range" in step:
                         if execution.get("learned_segments"):
@@ -1887,6 +1916,10 @@ class PickupExecutor:
                                                                  steady_now=self.monotonic_clock())
                             from tools.data_factory.rollout.gripper_evidence import check_transition
                             check_transition(execution["learned_start_observation"], terminal_observation, command=segment["type"] == "GRIPPER")
+                            if "contact_pending" in execution:
+                                from tools.data_factory.motion.contact_transition import completed
+                                completed(self.transport, run["plan"], segment, terminal_observation,
+                                          execution["prospective_contact"], execution.pop("contact_pending"))
                             if run["state"] != "EXECUTING" or run["cancel_event"].is_set():
                                 continue
                             self._verified_gripper_feedback(run, {

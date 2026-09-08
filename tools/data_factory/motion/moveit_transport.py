@@ -150,13 +150,77 @@ class RosMoveItTransport:
                 "brightness_mean": brightness, "source_timestamp_s": stamp,
                 "valid_until_s": stamp + age}
 
-    def mechanical_contact_context(self, plan, scene_object, snapshot):
+    def prepare_contact_transition(self, plan, scene_object, *, first, deadline_s):
+        from .contact_transition import prepare
+        if not first:
+            return {"status": "UNAVAILABLE", "code": "CONTACT_PROSPECTIVE_START_REQUIRED"}
+        segments = plan["steps"][0].get("held_target_segments", [])
+        if (not segments or segments[-1]["type"] != "GRIPPER"
+                or any(step["type"] != "ARM" for step in segments[:-1])):
+            return {"status": "UNAVAILABLE", "code": "CONTACT_PREFIX_UNSUPPORTED"}
+        try:
+            context = prepare(self, plan, scene_object)
+            context["deadline_s"] = deadline_s
+        except ContractError as exc:
+            if exc.code == "CONTACT_PROFILE_UNAVAILABLE":
+                return {"status": "UNAVAILABLE", "code": exc.code}
+            raise
+        except (KeyError, AttributeError, ValueError, TypeError, ET.ParseError) as exc:
+            raise ContractError("CONTACT_GEOMETRY_UNAVAILABLE") from exc
+        source = plan["learned_source_program"]
+        obj = self._collision_object(plan["scene_binding"]["object_instance_id"], context["dimensions_m"],
+                                     context["datum"]["translation_m"], source["planning_scene"]["frame_id"])
+        q = _rotation_quaternion(context["datum"]["rotation_columns"])
+        obj.primitive_poses[0].orientation.x, obj.primitive_poses[0].orientation.y, obj.primitive_poses[0].orientation.z, obj.primitive_poses[0].orientation.w = q
+        request = self._ApplyPlanningScene.Request()
+        request.scene = self._PlanningScene(is_diff=True)
+        request.scene.world.collision_objects = [*self._planning_scene_objects(source["planning_scene"]), obj]
+        response = self._service(self._ApplyPlanningScene, "/apply_planning_scene", request, "PLANNING_SCENE_APPLY")
+        if response.success is not True:
+            raise ContractError("PLANNING_SCENE_APPLY")
+        self._read_mechanical_scene(source, released=obj)
+        self._contact_world_object = obj
+        return context
+
+    def contact_fk(self, source, snapshot, link):
+        from moveit_msgs.srv import GetPositionFK
+        from tools.fr5_data_factory import validate_rigid_transform
+        query = GetPositionFK.Request()
+        query.header.frame_id = source["frames"]["planning_frame"]
+        query.fk_link_names = [link]
+        query.robot_state = self._RobotState(joint_state=self._JointState(
+            name=[*JOINT_ORDER, "finger_right_joint"],
+            position=[*snapshot["joint_positions"], snapshot["gripper_controller"]["feedback_position_m"]]))
+        result = self._service(GetPositionFK, "/compute_fk", query, "MECHANICAL_FK")
+        if (result.error_code.val != self._moveit_success or list(result.fk_link_names) != [link]
+                or len(result.pose_stamped) != 1 or result.pose_stamped[0].header.frame_id != query.header.frame_id):
+            raise ContractError("MECHANICAL_FK")
+        p = result.pose_stamped[0].pose
+        x,y,z,w = p.orientation.x,p.orientation.y,p.orientation.z,p.orientation.w
+        if abs(x*x+y*y+z*z+w*w-1) > 1e-9:
+            raise ContractError("MECHANICAL_FK")
+        return validate_rigid_transform({"translation_m": [p.position.x,p.position.y,p.position.z],
+            "rotation_columns": [[1-2*(y*y+z*z),2*(x*y+z*w),2*(x*z-y*w)],
+                                 [2*(x*y-z*w),1-2*(x*x+z*z),2*(y*z+x*w)],
+                                 [2*(x*z+y*w),2*(y*z-x*w),1-2*(x*x+y*y)]]}, "MECHANICAL_FK")
+
+    def check_contact_segment(self, plan, step, snapshot, context, *, closing):
+        self._read_mechanical_scene(plan["learned_source_program"], released=self._contact_world_object)
+        checked = {**plan, "initial_joint_state": snapshot["joint_positions"], "steps": [step]}
+        if closing:
+            checked["contact_touch_object"] = plan["scene_binding"]["object_instance_id"]
+        return self._check_plan_collision(checked, snapshot["gripper_controller"]["feedback_position_m"])
+
+    def mechanical_contact_context(self, plan, scene_object, snapshot, *, prospective=None):
         """Report the native producer's available evidence without inventing grasp.
 
         Native stable closure and its calibrated feedback range establish the
         accepted contact criterion. They do not locate the cube along the tips
         after arbitrary learned motion; preserve that distinction at the caller.
         """
+        if prospective is not None and prospective.get("status") == "PROSPECTIVE":
+            from .contact_transition import consume
+            return consume(self, plan, scene_object, snapshot, prospective)
         diagnostic = {"status": "BLOCKED_UNAVAILABLE", "source_program_digest": canonical_digest(plan["learned_source_program"]),
             "scene_binding": copy.deepcopy(plan["scene_binding"]), "snapshot_digest": canonical_digest(snapshot),
             "scene_object_digest": canonical_digest(scene_object), "physical_success": False,
@@ -247,9 +311,15 @@ class RosMoveItTransport:
     def _read_mechanical_scene(self, source, attached=None, released=None):
         query = self._GetPlanningScene.Request()
         query.components = self._PlanningSceneComponents(components=(
-            self._PlanningSceneComponents.WORLD_OBJECT_GEOMETRY | self._PlanningSceneComponents.ROBOT_STATE_ATTACHED_OBJECTS))
+            self._PlanningSceneComponents.WORLD_OBJECT_GEOMETRY | self._PlanningSceneComponents.ROBOT_STATE_ATTACHED_OBJECTS
+            | self._PlanningSceneComponents.ALLOWED_COLLISION_MATRIX))
         result = self._service(self._GetPlanningScene, "/get_planning_scene", query, "PLANNING_SCENE_READ")
         scene = result.scene
+        matrix = scene.allowed_collision_matrix
+        object_id = released.id if released is not None else attached.object.id if attached is not None else None
+        if (any(matrix.default_entry_values)
+                or object_id in matrix.entry_names and any(matrix.entry_values[list(matrix.entry_names).index(object_id)].enabled)):
+            raise ContractError("CONTACT_COLLISION_POLICY")
         expected = self._planning_scene_objects(source["planning_scene"])
         if released is not None:
             expected.append(released)
@@ -267,7 +337,11 @@ class RosMoveItTransport:
     def check_mechanical_terminal(self, terminal, source):
         """Collision/no-motion checks accept a measured held start, never open-only."""
         before = terminal["initial_snapshot"]
-        plan = {**source, "initial_joint_state": before["joint_positions"], "steps": terminal["steps"], "mechanical_terminal": True}
+        # Post-release trajectories were planned against a request-local detach
+        # diff. The actual scene stays attached until full-open completion;
+        # dispatch checks those trajectories against the actual detached scene.
+        plan = {**source, "initial_joint_state": before["joint_positions"],
+                "steps": terminal["steps"][:3], "mechanical_terminal": True}
         collision=self._check_plan_collision(plan, before["gripper_controller"]["feedback_position_m"])
         current = self.snapshot(source["planning"]["max_joint_state_age_s"])
         tolerance = source["planning"]["goal_tolerances"]["joint_rad"]
@@ -278,6 +352,31 @@ class RosMoveItTransport:
             raise ContractError("PLAN_ONLY_MOVED_ROBOT")
         return {"collision_report":collision,"before_snapshot_digest":canonical_digest(before),
                 "after_snapshot_digest":canonical_digest(current),"status":"PASS"}
+
+    def mechanical_future_scene(self, source, contact, joints):
+        """Request-local detached geometry for retreat planning; never apply it."""
+        from moveit_msgs.msg import AttachedCollisionObject
+        from tools.fr5_data_factory import compose_rigid_transform
+        obj = contact["carried_object"]
+        opened = next(s["gripper_position_m"] for s in source["steps"] if s["phase"] == "GRIPPER_OPEN")
+        base = self.contact_fk(source, {"joint_positions": joints,
+            "gripper_controller": {"feedback_position_m": opened}}, obj["link_name"])
+        x,y,z,w = obj["rotation_xyzw"]
+        relation = {"translation_m": obj["translation_m"], "rotation_columns":
+            [[1-2*(y*y+z*z),2*(x*y+z*w),2*(x*z-y*w)],
+             [2*(x*y-z*w),1-2*(x*x+z*z),2*(y*z+x*w)],
+             [2*(x*z+y*w),2*(y*z-x*w),1-2*(x*x+y*y)]]}
+        pose = compose_rigid_transform(base, relation)
+        released = self._collision_object(obj["object_id"], obj["dimensions_m"], pose["translation_m"], source["frames"]["planning_frame"])
+        released.primitive_poses[0].orientation.x, released.primitive_poses[0].orientation.y, released.primitive_poses[0].orientation.z, released.primitive_poses[0].orientation.w = _rotation_quaternion(pose["rotation_columns"])
+        diff = self._PlanningScene(is_diff=True)
+        diff.robot_state.is_diff = True
+        diff.robot_state.joint_state = self._JointState(name=["finger_right_joint"], position=[opened])
+        detach = AttachedCollisionObject(link_name=obj["link_name"])
+        detach.object.id, detach.object.operation = obj["object_id"], self._CollisionObject.REMOVE
+        diff.robot_state.attached_collision_objects = [detach]
+        diff.world.collision_objects = [released]
+        return diff
 
     def complete_mechanical_terminal(self, terminal):
         """Read final commanded state; no learned/physical landing success claim."""
@@ -1475,7 +1574,33 @@ class RosMoveItTransport:
                 if plan.get("mechanical_terminal"):
                     request.robot_state.is_diff = True
                 response = self._service(self._GetStateValidity, "/check_state_validity", request, "COLLISION_SERVICE")
-                evidence = {"label": label, "joints_rad": list(map(float, joints)), "finger_right_joint_m": float(position), "valid": bool(getattr(response, "valid", False))}
+                constraints = list(getattr(response, "constraint_result", []))
+                constraints_valid = all(c.result is True and math.isfinite(c.distance) and c.distance == 0 for c in constraints)
+                valid = getattr(response, "valid", False) is True and constraints_valid
+                if not valid and plan.get("contact_touch_object"):
+                    from .contact_transition import TIPS
+                    obj = plan["contact_touch_object"]
+                    contacts = list(getattr(response, "contacts", []))
+                    # MoveIt 2.12 state validation requests (world+collision
+                    # links)^2 contacts. A saturated response is not complete
+                    # evidence that all collisions are intended contacts.
+                    model = ET.fromstring(self._robot_description)
+                    limit = (3 + sum(bool(link.findall("collision")) for link in model.findall("link"))) ** 2
+                    def intended(c):
+                        bodies = {(c.contact_body_1, c.body_type_1), (c.contact_body_2, c.body_type_2)}
+                        values = [c.depth, c.position.x,c.position.y,c.position.z,c.normal.x,c.normal.y,c.normal.z]
+                        return (any(bodies == {(obj, c.WORLD_OBJECT), (tip, c.ROBOT_LINK)} for tip in TIPS)
+                            and c.header.frame_id == plan["frames"]["planning_frame"]
+                            and all(math.isfinite(v) for v in values) and c.depth >= 0
+                            and sum(v*v for v in values[4:]) > 0)
+                    valid = (constraints_valid and hasattr(response, "constraint_result")
+                             and 0 < len(contacts) < limit and all(intended(c) for c in contacts))
+                evidence = {"label": label, "joints_rad": list(map(float, joints)), "finger_right_joint_m": float(position), "valid": valid}
+                if plan.get("contact_touch_object"):
+                    evidence["native_valid"] = getattr(response, "valid", False) is True
+                    evidence["contacts"] = [{"body_1": c.contact_body_1, "type_1": c.body_type_1,
+                        "body_2": c.contact_body_2, "type_2": c.body_type_2, "depth_m": c.depth}
+                        for c in getattr(response, "contacts", [])]
                 samples.append(evidence)
                 if not evidence["valid"]:
                     failures.append(evidence)
@@ -1732,6 +1857,7 @@ class RosMoveItTransport:
         frames,
         planning,
         start_joint_state,
+        *, planning_scene_diff=None,
     ):
         goal = self._move_group_goal(
             phase,
@@ -1742,6 +1868,8 @@ class RosMoveItTransport:
             planning,
             start_joint_state,
         )
+        if planning_scene_diff is not None:
+            goal.planning_options.planning_scene_diff = copy.deepcopy(planning_scene_diff)
         try:
             send_future = self.move_group.send_goal_async(goal)
         except RuntimeError as exc:

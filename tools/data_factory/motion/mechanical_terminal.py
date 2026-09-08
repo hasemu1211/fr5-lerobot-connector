@@ -14,7 +14,7 @@ from tools.data_factory.readiness import RECORDER_READINESS_CONTRACT
 PHASES = ("RECYCLE_APPROACH_PTP", "LOWER_LIN", "GRIPPER_OPEN", "RETREAT_LIN", "SAFE_POSE_PTP")
 
 
-def closure_plateau(plan, snapshot, now, steady_now):
+def closure_plateau(plan, snapshot, now, steady_now, *, endpoint=False):
     """Consume the existing native settled-away proof and calibrated range.
 
     Hardware completion reason 2 is produced after observed movement and the
@@ -33,16 +33,18 @@ def closure_plateau(plan, snapshot, now, steady_now):
         accepted = required["acceptable_feedback_m"]
         # Same reference tolerance/range as PickupExecutor's existing qualified
         # gripper feedback consumer. No new physical contact threshold.
-        if (controller["ready"] is not True or wire["completion_reason"] != 2
+        reason = wire["completion_reason"]
+        if (controller["ready"] is not True or reason not in ((1, 2) if endpoint else (2,))
                 or wire["generation"] <= 0
                 or any(type(v) not in (int, float) or not math.isfinite(v) for v in (feedback, reference))
                 or abs(reference-required["command_position_m"]) > 1e-9
                 or abs(wire["raw_reference_m"]-reference) > 1e-9
                 or abs(wire["feedback_m"]-feedback) > 1e-9
-                or feedback <= reference
+                or reason == 2 and feedback <= reference
                 or not accepted["min"] <= feedback <= accepted["max"]):
             raise ContractError("MECHANICAL_CLOSURE_PLATEAU_UNAVAILABLE")
-        return {"status": "CALIBRATED_CLOSURE_PLATEAU", "source": "NATIVE_SETTLED_AWAY_COMPLETION",
+        return {"status": "CALIBRATED_CLOSURE_PLATEAU" if reason == 2 else "CALIBRATED_ENDPOINT_COMPLETION",
+                "source": "NATIVE_SETTLED_AWAY_COMPLETION" if reason == 2 else "NATIVE_MOTION_DONE_COMPLETION",
                 "generation": wire["generation"], "incarnation": identity(wire),
                 "command_position_m": reference, "feedback_position_m": feedback,
                 "acceptable_feedback_m": copy.deepcopy(accepted),
@@ -119,6 +121,7 @@ def compile_terminal(transport, *, plan, grant, snapshot, contact, remaining_s):
         raise ContractError("MECHANICAL_TERMINAL_STATE")
     scene_readback=transport.prepare_mechanical_terminal(source, contact)
     compiled = []
+    future_scene = None
     for step in steps:
         limits = step["limits"]
         item = {**step, "start_joint_state": state}
@@ -133,9 +136,11 @@ def compile_terminal(transport, *, plan, grant, snapshot, contact, remaining_s):
             full = transport.build_gripper_goal(step["phase"], step["gripper_position_m"], limits)
             item.update(type="GRIPPER", final_joint_state=state,
                         continuation_trajectory_b64=base64.b64encode(full).decode("ascii"))
+            future_scene = transport.mechanical_future_scene(source, contact, state)
         else:
             result = transport.plan_arm(step["phase"], step.get("target"), step.get("joint_positions_rad"),
-                                        limits, source["frames"], source["planning"], state)
+                                        limits, source["frames"], source["planning"], state,
+                                        **({"planning_scene_diff": future_scene} if future_scene is not None else {}))
             if result.get("terminal_status") != "SUCCEEDED" or result.get("moveit_success") is not True:
                 raise ContractError("MECHANICAL_TERMINAL_INFEASIBLE")
             encoded = result["serialized_trajectory"]

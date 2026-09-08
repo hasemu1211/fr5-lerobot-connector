@@ -476,7 +476,7 @@ class FinitePlanTest(unittest.TestCase):
             self.assertEqual(plan["learned_proposal"]["runtime_inputs"][hardware_key], str(binding_path))
             self.assertEqual(result["data"]["task_effectiveness"], "UNKNOWN")
 
-    def make_held_job(self, initial_feedback=.021, *, controller_samples=True, arm_target=.001, recorded=None, quantize_gripper=False, max_observation_age_s=5., mechanical=False):
+    def make_held_job(self, initial_feedback=.021, *, controller_samples=True, arm_target=.001, recorded=None, quantize_gripper=False, max_observation_age_s=5., mechanical=False, contact_fixture=None):
         # Reuse this file's lifecycle fixtures with the actual ROS serializers,
         # action dispatch, polling and cancellation; no ROS node is constructed.
         from builtin_interfaces.msg import Duration
@@ -537,7 +537,7 @@ class FinitePlanTest(unittest.TestCase):
         t._rclpy = SimpleNamespace(spin_until_future_complete=lambda *a, **kw: None, spin_once=lambda *a, **kw: None)
         t.preflight, t.precommit_safety = T().preflight, T().precommit_safety
         def observe(*_):
-            value = snapshot(state["joints"][:], gripper_position=state["feedback"])
+            value = snapshot(state["joints"][:], gripper_position=state["feedback"], force=20 if contact_fixture else 50)
             value["gripper_controller"]["reference_position_m"] = state["reference"]
             value["joint_state_age_s"] = state["age"]
             value["joint_state_stamp_ns"] = round(now[0] * 1e9)
@@ -607,6 +607,11 @@ class FinitePlanTest(unittest.TestCase):
             actions = copy.deepcopy(sample["actions"])
             obs["observation.state"] = sample["initial_state"][:]
         calls, cell, scene = [], Cell(), Scene()
+        if contact_fixture is not None:
+            xml, scene = contact_fixture(src, t)
+            actions = [[arm_target] * 6 + [.01176]]
+            cell_read = cell.read
+            cell.read = lambda: {**cell_read(), "robot_system_id": src["robot_system_id"]}
         executor = PickupExecutor(t, execution_enabled=True, cell_state_store=cell, scene_state_store=scene,
                                   source_clock=lambda: now[0], monotonic_clock=lambda: now[0])
         job = OneJob(Recorder(calls), executor.process)
@@ -2271,13 +2276,95 @@ class FinitePlanTest(unittest.TestCase):
     def test_native_mechanical_terminal_same_owner_stages_and_retains(self):
         self._native_mechanical_terminal_case()
 
+    def test_prospective_native_contact_reaches_release(self):
+        for reason in (1, 2):
+            with self.subTest(reason=reason):
+                self._native_mechanical_terminal_case(prospective=reason)
+        self._native_mechanical_terminal_case("delayed_services", prospective=1)
+
+    def test_closure_centering_envelope_contains_source_geometry_counterexample(self):
+        from tools.data_factory.motion.contact_transition import prepare, lateral_envelope
+        job, executor, native, *_ = self.make_held_job(mechanical=True, contact_fixture=self.prospective_contact_fixture)
+        with executor.scene_state_store.locked_snapshot(SCENE["scene_state_digest"]) as scene:
+            context = prepare(native, executor.runs["run"]["plan"], scene["scene_state"]["objects"]["cube-1"])
+        shift = 2 * job._program["source_program"]["planning"]["goal_tolerances"]["position_m"]
+        relation = {"translation_m": [context["jaw_midplane_m"] + shift, 0., .15],
+                    "rotation_columns": [[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]]}
+        width = context["dimensions_m"][0]
+        self.assertAlmostEqual(shift - (context["closed_gap_bound_m"] - width)/2, .00177)
+        envelope, dimensions = lateral_envelope(relation, context["dimensions_m"], context["jaw_midplane_m"], context["closed_gap_bound_m"])
+        lo, hi = envelope["translation_m"][0] - dimensions[0]/2, envelope["translation_m"][0] + dimensions[0]/2
+        for center in (relation["translation_m"][0], context["jaw_midplane_m"]):
+            self.assertLessEqual(lo, center - width/2)
+            self.assertGreaterEqual(hi, center + width/2)
+
+    def test_prospective_native_contact_rejections_send_no_next_goal(self):
+        for failure in ("earlier_contact", "geometry", "wrong_generation", "stale_state", "absent_relation",
+                        "nonfinger_contact", "failed_constraint", "empty_contact", "wrong_body_type", "close_pose"):
+            with self.subTest(failure=failure):
+                self._native_mechanical_terminal_case(failure, prospective=1)
+
+    def prospective_contact_fixture(self, src, transport):
+        """Temporary synthetic qualification, never selected for a live caller."""
+        import subprocess
+        from tools.fr5_data_factory import compose_rigid_transform, inverse_rigid_transform, validate_cell_calibration_document
+        repo = Path(__file__).resolve().parents[3]
+        root = repo / "config/data_factory"
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        transport.contact_config_root = Path(temporary.name)
+        docs = {}
+        for key, folder, name in (
+            ("object_profile", "objects", "wood-cube-24mm-r001"),
+            ("grasp_profile", "grasps", "wood-cube-24mm-top-3p5mm-r001"),
+            ("robot_system", "robot_systems", "fr5-lab-a-tcp-r002"),
+            ("cell_calibration", "cells", "place-b-yaw0-r001"),
+            ("yaw0_sheet", "workspace_sheets", "place-b-yaw0-r001_yaw0_sheet")):
+            value = json.loads((root / folder / (name + ".json")).read_text())
+            directory = transport.contact_config_root / folder
+            directory.mkdir()
+            (directory / (name + ".json")).write_text(json.dumps(value))
+            docs[key] = value
+            src["binding_digests"][key] = canonical_digest(value)
+        xml = subprocess.check_output(["git", "show", "60dfb2b49fe7c5154068e8bd4b411c1342508c78:src/fairino_description/urdf/fairino5_v6_gripper_opening_candidate.urdf"], cwd=repo, text=True)
+        transport._robot_description = xml
+        src["binding_digests"]["robot_description_digest"] = "sha256:" + hashlib.sha256(xml.encode()).hexdigest()
+        q = json.loads((root / "motion_qualifications/fr5-place-b-wood-cube-24mm-r001.json").read_text())
+        q.update(motion_qualification_id="synthetic-contact-only", frames=src["frames"],
+                 robot_description_digest=src["binding_digests"]["robot_description_digest"])
+        directory = transport.contact_config_root / "motion_qualifications"
+        directory.mkdir()
+        (directory / "synthetic-contact-only.json").write_text(json.dumps(q))
+        src["binding_digests"]["motion_qualification"] = canonical_digest(q)
+        src["gripper_requirements"] = copy.deepcopy(docs["grasp_profile"]["gripper_close"])
+        src["robot_system_id"] = docs["robot_system"]["robot_system_id"]
+        src["planning"]["max_joint_state_age_s"] = .1
+        cal = validate_cell_calibration_document(docs["cell_calibration"], yaw0=docs["yaw0_sheet"],
+            robot=docs["robot_system"], required_status="QUALIFIED")
+        datum = {"translation_m": cal["center"], "rotation_columns": [cal["x"],cal["y"],cal["z"]]}
+        tcp = compose_rigid_transform(datum, q["datum_to_tcp_grasp"])
+        tool = compose_rigid_transform(tcp, inverse_rigid_transform(q["tool_to_tcp"]))
+        for step in src["steps"]:
+            if step["phase"] == "FINAL_APPROACH_LIN":
+                step["target"] = {"base_tcp": tcp, "base_tool": tool}
+        transport._fixture_contact_tool = tool
+        transport._fixture_contact_gripper = compose_rigid_transform(tool,
+            {"translation_m": [0.,0.,.109], "rotation_columns": [[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]]})
+        item = {"state": "ON_SURFACE", "object_profile_id": docs["object_profile"]["object_profile_id"],
+                "pose": {"place_id": "PLACE_B", "yaw_deg": 0., "x_mm": 0., "y_mm": 0.}}
+        class InitialScene(Scene):
+            @contextmanager
+            def locked_snapshot(self, digest, *, blocking=True):
+                yield {"scene_state_digest": digest, "scene_state": {"revision": 1, "objects": {"cube-1": item}}}
+        return xml, InitialScene()
+
     def test_native_mechanical_terminal_rejection_boundaries(self):
         for failure in ("stale_contact","dark","scope","scene","revoke","partial_feedback","incarnation",
                         "dark_dispatch", "stale_dispatch", "expired_during_decode", "dark_staged_open"):
             with self.subTest(failure=failure):
                 self._native_mechanical_terminal_case(failure)
 
-    def _native_mechanical_terminal_case(self, failure=None):
+    def _native_mechanical_terminal_case(self, failure=None, prospective=False):
         """Explicit simulated contact/FK services; never a live qualification."""
         from moveit_msgs import msg, srv
         from geometry_msgs.msg import Pose, PoseStamped
@@ -2285,7 +2372,8 @@ class FinitePlanTest(unittest.TestCase):
         from shape_msgs.msg import SolidPrimitive
         from trajectory_msgs.msg import JointTrajectoryPoint
         from rclpy.serialization import serialize_message
-        job, executor, transport, state, now, sent, _, calls = self.make_held_job(mechanical=True, max_observation_age_s=.3)
+        job, executor, transport, state, now, sent, _, calls = self.make_held_job(mechanical=True, max_observation_age_s=.3,
+            contact_fixture=self.prospective_contact_fixture if prospective else None)
         for name in ("CollisionObject", "PlanningScene", "PlanningSceneComponents", "RobotState"):
             setattr(transport, "_"+name, getattr(msg,name))
         for name in ("ApplyPlanningScene", "GetPlanningScene", "GetStateValidity"):
@@ -2293,6 +2381,11 @@ class FinitePlanTest(unittest.TestCase):
         transport._Pose, transport._SolidPrimitive, transport._JointState = Pose, SolidPrimitive, JointState
         world, attached, services, starts = {}, [], [], []
         def service(kind, endpoint, request, code):
+            if prospective:
+                from rclpy.serialization import deserialize_message
+                request = deserialize_message(serialize_message(request), type(request))
+                if failure == "delayed_services" and not attached and executor.runs["run"]["state"] == "EXECUTING":
+                    now[0] = round(now[0] + .01, 9)
             services.append(endpoint)
             if kind is srv.ApplyPlanningScene:
                 for obj in request.scene.world.collision_objects:
@@ -2309,19 +2402,48 @@ class FinitePlanTest(unittest.TestCase):
                 scene.robot_state.attached_collision_objects=attached[:]
                 return SimpleNamespace(scene=scene)
             if kind is srv.GetStateValidity:
-                self.assertTrue(request.robot_state.is_diff)
+                if not prospective:
+                    self.assertTrue(request.robot_state.is_diff)
                 self.assertEqual(request.group_name,"")
                 self.assertEqual(len(attached),0 if "cube-1" in world else 1)
+                if prospective and "cube-1" in world and not attached:
+                    if failure == "earlier_contact":
+                        return srv.GetStateValidity.Response(valid=False)
+                    if request.robot_state.joint_state.position[-1] < .02:
+                        contact = msg.ContactInformation()
+                        contact.header.frame_id = "base_link"
+                        contact.contact_body_1, contact.body_type_1 = "cube-1", contact.WORLD_OBJECT
+                        contact.contact_body_2, contact.body_type_2 = "finger_tip_left_link", contact.ROBOT_LINK
+                        contact.normal.x = 1.
+                        if failure == "nonfinger_contact": contact.contact_body_2 = "wrist3_link"
+                        if failure == "wrong_body_type": contact.body_type_2 = contact.WORLD_OBJECT
+                        return srv.GetStateValidity.Response(valid=False,
+                            contacts=[] if failure == "empty_contact" else [contact],
+                            constraint_result=[msg.ConstraintEvalResult(result=False, distance=1.)] if failure == "failed_constraint" else [])
                 return SimpleNamespace(valid=True)
             if kind is srv.GetPositionFK:
                 pose=PoseStamped()
                 pose.header.frame_id=request.header.frame_id
                 pose.pose.orientation.w=1.
                 pose.pose.position.z=.3
+                if prospective:
+                    from tools.data_factory.motion.moveit_transport import _rotation_quaternion
+                    transform = transport._fixture_contact_gripper if request.fk_link_names == ["gripper_link"] else transport._fixture_contact_tool
+                    pose.pose.position.x,pose.pose.position.y,pose.pose.position.z = transform["translation_m"]
+                    pose.pose.orientation.x,pose.pose.orientation.y,pose.pose.orientation.z,pose.pose.orientation.w = _rotation_quaternion(transform["rotation_columns"])
+                    if failure == "close_pose":
+                        pose.pose.position.x += 2 * executor.runs["run"]["plan"]["planning"]["goal_tolerances"]["position_m"]
                 return SimpleNamespace(error_code=SimpleNamespace(val=1),fk_link_names=request.fk_link_names,pose_stamped=[pose])
             self.fail(endpoint)
         transport._service=service
-        def plan_arm(phase,target,joints,limits,frames,planning,start):
+        def plan_arm(phase,target,joints,limits,frames,planning,start, **options):
+            if phase in {"RETREAT_LIN", "SAFE_POSE_PTP"}:
+                diff = options["planning_scene_diff"]
+                self.assertEqual(len(attached), 1)
+                self.assertNotIn("cube-1", world)
+                self.assertEqual(diff.robot_state.attached_collision_objects[0].object.operation, msg.CollisionObject.REMOVE)
+                self.assertEqual(diff.world.collision_objects[0].id, "cube-1")
+                self.assertTrue(serialize_message(diff))
             starts.append(start[:])
             trajectory=msg.RobotTrajectory()
             trajectory.joint_trajectory.joint_names=JOINTS[:6]
@@ -2331,6 +2453,32 @@ class FinitePlanTest(unittest.TestCase):
             return {"terminal_status":"SUCCEEDED","moveit_success":True,
                     "serialized_trajectory":serialize_message(trajectory),"final_joint_state":list(joints or start)}
         transport.plan_arm=plan_arm
+        if prospective:
+            from moveit_msgs.action import MoveGroup
+            from tools.data_factory.motion.moveit_transport import RosMoveItTransport
+            transport._MoveGroup = MoveGroup
+            for name in ("Constraints", "JointConstraint", "PositionConstraint", "OrientationConstraint"):
+                setattr(transport, "_" + name, getattr(msg, name))
+            def planner_send(goal):
+                self.assertTrue(goal.planning_options.plan_only)
+                self.assertTrue(serialize_message(goal))
+                constraint = goal.request.goal_constraints[0]
+                start = list(goal.request.start_state.joint_state.position)
+                joints = [c.position for c in constraint.joint_constraints] or None
+                options = ({"planning_scene_diff": goal.planning_options.planning_scene_diff}
+                           if constraint.name in {"RETREAT_LIN", "SAFE_POSE_PTP"} else {})
+                if options:
+                    self.assertEqual(list(goal.planning_options.planning_scene_diff.robot_state.joint_state.position), [.021])
+                built = plan_arm(constraint.name, None, joints, None, None, None, start, **options)
+                result = MoveGroup.Result()
+                result.error_code.val = 1
+                result.planned_trajectory = transport._deserialize_message(built["serialized_trajectory"], msg.RobotTrajectory)
+                future = mock.Mock(done=lambda: True, result=lambda: SimpleNamespace(status=4, result=result))
+                handle = mock.Mock(accepted=True, get_result_async=lambda: future)
+                return mock.Mock(done=lambda: True, result=lambda: handle)
+            transport.move_group = mock.Mock(send_goal_async=planner_send)
+            transport.plan_arm = RosMoveItTransport.plan_arm.__get__(transport)
+            self.assertIs(transport.mechanical_contact_context.__func__, RosMoveItTransport.mechanical_contact_context)
         illumination_captures = []
         def illumination_sample():
             return {"kind": "CURRENT_REQUIRED_ILLUMINATION", "camera_topic": "/up",
@@ -2368,12 +2516,20 @@ class FinitePlanTest(unittest.TestCase):
             if failure=="dark": context["illumination"]["brightness_mean"]=0.
             if failure=="scope": context["source_program_digest"]=canonical_digest("foreign")
             return context
-        transport.mechanical_contact_context=simulated_contact
+        if not prospective:
+            transport.mechanical_contact_context=simulated_contact
         original=copy.deepcopy(executor.runs["run"]["plan"])
+        if failure == "geometry":
+            transport._robot_description += " "
         grant=task_grant(job._program["source_program"],SCENE,original["learned_proposal"],max_outputs=1,terminal_reserve_s=30.)
         self.assertTrue(job.admit_task(grant)["ok"])
         with mock.patch('tools.data_factory.motion.moveit_transport.time.time',side_effect=lambda:now[0]):
-            self.assertTrue(job.start()["ok"])
+            started = job.start()
+            if failure in {"earlier_contact", "geometry"}:
+                self.assertFalse(started["ok"])
+                self.assertEqual(sent, [])
+                return
+            self.assertTrue(started["ok"], started["code"])
             deadline=executor.runs["run"]["task_deadline"]
             def complete_goal():
                 goal=sent[-1]
@@ -2384,18 +2540,34 @@ class FinitePlanTest(unittest.TestCase):
                     point=goal.trajectory.points[-1]
                     value=point.positions[0]
                     state.update(reference=value,feedback=value)
+                    if prospective and value == .01176:
+                        state["hardware_override"]["completion_reason"] = float(prospective)
+                        if prospective == 2:
+                            state["feedback"] = .01218
                 duration=point.time_from_start.sec+point.time_from_start.nanosec/1e9+.002
                 while duration>.2:
                     now[0]=round(now[0]+.2,9)
                     duration-=.2
                     self.assertTrue(job.poll()["ok"])
+                    if point.positions == [.0126]:
+                        self.assertIs(sent[-1], goal)
                 now[0]=round(now[0]+duration,9)
                 state["complete"]=True
                 return job.poll()
             while job.state != "LEARNED_CHUNK_COMPLETE":
                 completed=complete_goal()
+                if failure in {"nonfinger_contact", "failed_constraint", "empty_contact", "wrong_body_type", "close_pose"}:
+                    self.assertFalse(completed["ok"])
+                    self.assertEqual(len(sent), 1)
+                    return
                 self.assertTrue(completed["ok"],completed["code"])
             learned_count=len(sent)
+            if failure == "wrong_generation":
+                state["generation"] += 1
+            if failure == "stale_state":
+                state["age"] = 2.
+            if failure == "absent_relation":
+                executor.runs["run"]["execution"]["prospective_contact"]["close"] = None
             if failure=="revoke":
                 recorder=job.recorder_call
                 def revoke_on_freeze(request):
@@ -2405,6 +2577,11 @@ class FinitePlanTest(unittest.TestCase):
                     return result
                 job.recorder_call=revoke_on_freeze
             result=job.task_boundary()
+            if failure in {"wrong_generation", "stale_state", "absent_relation"}:
+                self.assertFalse(result["ok"])
+                self.assertEqual(len(sent), learned_count)
+                self.assertIn(("recorder", "retain"), calls)
+                return
             if failure in {"stale_contact","dark","scope","scene","revoke",
                            "dark_dispatch", "stale_dispatch", "expired_during_decode"}:
                 self.assertFalse(result["ok"])
@@ -2440,13 +2617,22 @@ class FinitePlanTest(unittest.TestCase):
             self.assertEqual(terminal["status"],"COMPLETED",(result["code"],terminal.get("failure_code")))
             self.assertEqual(terminal["terminal_phases"],["RECYCLE_APPROACH_PTP","LOWER_LIN","GRIPPER_OPEN","RETREAT_LIN","SAFE_POSE_PTP"])
             self.assertEqual(len(sent)-learned_count,6)
-            self.assertEqual(len(illumination_captures), 6)
+            self.assertEqual(len(illumination_captures), 7 if prospective else 6)
             self.assertGreater(now[0], terminal["plan"]["contact_evidence"]["illumination"]["valid_until_s"])
             self.assertEqual(terminal["last_illumination"]["source_timestamp_s"], illumination_captures[-1])
             self.assertEqual([sent[learned_count+i].trajectory.points[-1].positions[0] for i in (2,3)],[.0126,.021])
             self.assertEqual(executor.runs["run"]["plan"],original)
             self.assertEqual(executor.runs["run"]["task_deadline"],deadline)
             self.assertEqual(terminal["plan"]["grant_digest"],grant["grant_digest"])
+            if prospective:
+                contact = terminal["plan"]["contact_evidence"]
+                self.assertEqual(contact["closure_contact"]["status"], "CALIBRATED_ENDPOINT_COMPLETION" if prospective == 1 else "CALIBRATED_CLOSURE_PLATEAU")
+                self.assertEqual(contact["relation_semantics"], "OPPOSED_JAW_LATERAL_ENVELOPE")
+                self.assertGreaterEqual(contact["carried_object"]["dimensions_m"][0], .024)
+                self.assertIs(contact["physical_success"], False)
+                if failure == "delayed_services":
+                    first = contact["prospective_transition"]["checked_segments"][0]
+                    self.assertGreater(first["start_observation"]["captured_at_s"] - first["checked_start_observation"]["captured_at_s"], .1)
             self.assertEqual(result["execution_evidence"]["learned_execution"]["terminal_phases"],["LEARNED_CHUNK"])
             self.assertEqual(terminal["release_readback"]["physical_landing"],"NOT_OBSERVED")
             self.assertIn(("recorder","retain"),calls)
