@@ -10,6 +10,7 @@ from control_msgs.action import FollowJointTrajectory
 from control_msgs.msg import JointTrajectoryControllerState
 from moveit_msgs.msg import MoveItErrorCodes, RobotTrajectory
 from rclpy.serialization import deserialize_message, serialize_message
+from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectoryPoint
 
 from tools.fr5_data_factory import ContractError
@@ -51,10 +52,13 @@ class TestExecutionTransport(unittest.TestCase):
 
                 def spin(*_, timeout_sec):
                     clock[0] += timeout_sec
-                    transport._on_joint_state(SimpleNamespace(
+                    joint_state = JointState(
                         name=["j1", "j2", "j3", "j4", "j5", "j6"],
                         position=[0.0] * 6,
-                    ))
+                    )
+                    joint_state.header.stamp.sec = 1234
+                    joint_state.header.stamp.nanosec = 5678
+                    transport._on_joint_state(joint_state)
                     for callback, name in (
                         (transport._on_arm_controller_state, "j1"),
                         (transport._on_gripper_controller_state, "finger_right_joint"),
@@ -83,6 +87,7 @@ class TestExecutionTransport(unittest.TestCase):
                         self.assertLessEqual(clock[0], 5.0)
                         continue
                     snapshot = transport.snapshot(0.1)
+                    self.assertEqual(snapshot["joint_state_stamp_ns"], 1234000005678)
                     self.assertEqual(snapshot["gripper_settings"]["velocity_percent"], 20)
                     self.assertTrue(transport._initial_snapshot_complete)
                     self.assertLess(clock[0], 1.6)  # No unconditional five-second sleep.
