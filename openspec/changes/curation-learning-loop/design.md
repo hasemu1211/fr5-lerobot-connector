@@ -1,5 +1,63 @@
 ## 작은 구현과 소비 경계
 
+### Terminal learned-run 진단에서 기존 재수집 draft로
+
+`recommend_stored_collection(..., rollout_lifecycle_path=...)`와 CLI
+`--rollout-lifecycle`은 기존 run directory의 원본
+`learned_lifecycle_result.json`을 받는다. Rollout의 `build_run_diagnostic`으로
+다시 계산하며 별도의 failure wrapper나 진단 validator를 만들지 않는다.
+`rollout_evidence_analysis_ref`는 diagnostic schema, `run_id`, 완전한 diagnostic의
+canonical digest를 결속한다. Diagnostic 안의 `lifecycle_result_digest`,
+`plan_digest`, `proposal_digest`, `checkpoint`, recorder disposition과
+human semantic evidence는 기존 owner의 의미를 그대로 유지한다.
+
+진단 ref만 허용하는 국소 수정으로는 원본 lifecycle이 없을 때 다시 검증할 수
+없었다. 따라서 기존 run producer는 원본 terminal 결과를 보존하고, Curator는
+그 원본을 소비하는 경계만 추가한다. 별도 실행 ledger나 synthetic failure로의
+변환은 채택하지 않는다. 원본 보존은 run producer 소유이며 이 기능이 과거
+실행 근거를 복원하지 않는다.
+
+현재 지원 범위는 기존 compiled authoring이 유지된 campaign이다. 검증된
+plan의 `resolved_job_digest`, `learned_source_program`, resolver receipt의
+`input_digests`를 기존 qualified base condition에 정확히 결속한다. 좌표가
+같다는 이유로 다른 task, calibration, object 또는 camera profile을 합치지
+않는다. DQA가 명시적으로 제공된 collected episodes에서 관측하지 못한 그
+조건에 한해서 기존 sampler의 bounded `campaign_selection`을 제안한다.
+count, pin, exclusion 및 native CAS는 계속 기존 owner가 처리한다.
+Controller fault가 데이터 부족의 원인이라는 추론이나 controller completion이
+task success라는 추론은 하지 않는다. `ROLLOUT_DATA_DEFICIT_UNPROVEN`은
+계속 UNKNOWN이며 coverage는 해당 입력 범위의 사실일 뿐이다.
+
+관측된 조건도 데이터 효용이 충분하다고 단정하지 않는다. 기존 native API가
+완료된 chunk에 대해 `source: HUMAN`, `review_scope: FINITE_LEARNED_CHUNK`,
+FAIL을 기록하고 OneJob이 `SEMANTIC_FAIL`로 종료한 경우에는 별도의
+`REDEMONSTRATE_CONDITION` 제안을 허용한다. 이유는
+`HUMAN_REVIEWED_CHUNK_FAILURE`이며 기록된 사람 판단의 범위를 보존한다.
+이는 같은 qualified condition에서 한 번 더 시연해 비교할 가설이지, 전체
+Pick 실패 판정이나 데이터 부족의 원인 진단이 아니다. Proxy, 판정 부재,
+다른 scope 또는 불일치한 verdict는 이 제안의 근거가 될 수 없다.
+
+출력은 기존 recommendation/coverage report와 선택적 `rollout_diagnostic.json`이다.
+`project_campaign_update_intent(..., rollout_lifecycle_result=...)`는 같은 원본과
+현재 native view를 다시 검증하여 기존 `update_draft` intent를 반환한다.
+이후 실제 `compile_draft`와 모든 실행 gate는 CampaignOperator 소유다.
+조건이 이미 관측됐고 위 사람 판단도 없거나 제약 때문에 선택할 수 없으면
+patch가 없고 IO는
+`COLLECTION_RECOMMENDATION_ROLLOUT_NO_SUPPORTED_COLLECTION_PATCH`를 반환한다.
+Authoring/condition 부재, standalone diagnostic 또는 변경된 입력은 UNAVAILABLE이다.
+V2 mixed-campaign acquisition으로의 rollout targeting은 지원한다고 주장하지 않는다.
+
+재현 가능한 호출은 `direnv exec . python3 -m
+tools.data_factory.collection_recommendation_io --run-dir <canonical-collected-run>
+--source-commit <caller-commit> --rollout-lifecycle <original-terminal-result>`이다.
+출력 경로 생략은 read-only 계산이며 선택적인 새 `--output-root`에는 세 문서를
+기존 atomic/exclusive publication으로 함께 쓴다. 재전달은
+`--expected-recommendation-digest`로 현재 입력과 비교한다.
+`tests.data_factory.test_collection_recommendation.RolloutRecommendationTests`가
+canonical CPU fixture → 추천 → native draft/compile 및 변조·stale·무효과 경계를
+검증한다. 실제 learned run, 물리 효용, training/semantic 승인 검증은 이 테스트의
+주장이 아니다.
+
 ### 사람이 보이는 조건을 포함한 원본·고정 정제 비교
 
 첫 비교는 같은 원본 episode identity와 평가 cohort에서 raw, 원본 이미지의

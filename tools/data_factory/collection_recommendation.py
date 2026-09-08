@@ -107,10 +107,11 @@ UNKNOWN_REASON_SUBJECTS = {
     "COVERAGE_NOT_MEASURED": "coverage",
     "DATA_QUALITY_ANALYSIS_UNAVAILABLE": "quality",
     "NO_CANONICAL_PHYSICAL_ROLLOUT_ANALYSIS": "rollout",
+    "ROLLOUT_DATA_DEFICIT_UNPROVEN": "rollout",
     "SEMANTIC_PROOF_UNAVAILABLE": "semantic",
 }
 OBSERVED_VALUE_FIELDS = frozenset({"metric", "count"})
-SUGGESTED_VALUES = frozenset({"COLLECT_MORE"})
+SUGGESTED_VALUES = frozenset({"COLLECT_MORE", "REDEMONSTRATE_CONDITION"})
 PATCH_FIELDS_ALLOWLIST = frozenset({
     "requested_count", "repeat", "split", "selection",
     "state_space_design_factors", "campaign_selection",
@@ -312,11 +313,20 @@ def _analysis_ref(
         return ref
     if ref["availability"] != "AVAILABLE" or reasons:
         raise ContractError("COLLECTION_RECOMMENDATION_ANALYSIS_AVAILABILITY")
-    if owner == "rollout":
-        raise ContractError("COLLECTION_RECOMMENDATION_ROLLOUT_OWNER")
     schema = _identifier(ref["schema_version"], "COLLECTION_RECOMMENDATION_ANALYSIS_SCHEMA")
     analysis_id = _identifier(ref["analysis_id"], "COLLECTION_RECOMMENDATION_ANALYSIS_ID")
     expected_digest = _digest(ref["analysis_digest"], "COLLECTION_RECOMMENDATION_ANALYSIS_DIGEST")
+    if owner == "rollout":
+        if schema != "data_factory.rollout_run_diagnostic.v1":
+            raise ContractError("COLLECTION_RECOMMENDATION_ROLLOUT_OWNER")
+        if artifact is not _MISSING:
+            from tools.data_factory.rollout.evidence_boundary import build_run_diagnostic
+            if not isinstance(artifact, Mapping):
+                raise ContractError("COLLECTION_RECOMMENDATION_ROLLOUT_LIFECYCLE_REQUIRED")
+            diagnostic = build_run_diagnostic(artifact)
+            if diagnostic["run_id"] != analysis_id or canonical_digest(diagnostic) != expected_digest:
+                raise ContractError("COLLECTION_RECOMMENDATION_ANALYSIS_DIGEST")
+        return ref
     if schema != DATA_QUALITY_SCHEMA:
         raise ContractError("COLLECTION_RECOMMENDATION_DATA_QUALITY_OWNER")
     if artifact is not _MISSING:
@@ -421,12 +431,20 @@ def _claims(
         if (
             claim["class"] == "OBSERVED" and (not evidence or basis or reasons)
             or claim["class"] == "SUGGESTED"
-            and (not basis or reasons != ["COVERAGE_DEFICIT"])
+            and (not basis or reasons != [
+                "HUMAN_REVIEWED_CHUNK_FAILURE" if claim["value"] == "REDEMONSTRATE_CONDITION"
+                else "COVERAGE_DEFICIT"
+            ])
             or claim["class"] == "UNKNOWN" and (basis or not reasons)
             or claim["class"] == "UNKNOWN" and any(
                 UNKNOWN_REASON_SUBJECTS.get(reason) != claim["subject"]
                 for reason in reasons
             )
+        ):
+            raise ContractError("COLLECTION_RECOMMENDATION_CLAIM_EPISTEMIC")
+        if claim["class"] == "SUGGESTED" and claim["value"] == "REDEMONSTRATE_CONDITION" and (
+            snapshot["rollout_evidence_analysis_ref"]["availability"] != "AVAILABLE"
+            or snapshot["rollout_evidence_analysis_ref"]["analysis_digest"] not in evidence
         ):
             raise ContractError("COLLECTION_RECOMMENDATION_CLAIM_EPISTEMIC")
         claim.update(
@@ -462,6 +480,8 @@ def _claims(
         "robot": "ROBOT_VARIATION_UNMEASURED",
         "rollout": "NO_CANONICAL_PHYSICAL_ROLLOUT_ANALYSIS",
     }
+    if snapshot["rollout_evidence_analysis_ref"]["availability"] == "AVAILABLE":
+        required_unknowns["rollout"] = "ROLLOUT_DATA_DEFICIT_UNPROVEN"
     if snapshot["data_quality_analysis_ref"]["availability"] == "UNAVAILABLE":
         required_unknowns["quality"] = "DATA_QUALITY_ANALYSIS_UNAVAILABLE"
     elif any(claim["subject"] == "quality" for claim in result):
@@ -597,6 +617,7 @@ def build_collection_recommendation(
         rollout_evidence_analysis=rollout_evidence_analysis,
         normalize=True,
     )
+    _rollout_condition(campaign_hypothesis, rollout_evidence_analysis)
     snapshot = {
         "schema_version": SNAPSHOT_SCHEMA,
         "source_commit": source_commit,
@@ -611,6 +632,8 @@ def build_collection_recommendation(
     }
     snapshot["snapshot_digest"] = canonical_digest(snapshot)
     checked_claims = _claims(claims, snapshot, normalize=True)
+    if any(c["value"] == "REDEMONSTRATE_CONDITION" for c in checked_claims) and not _human_failed_chunk(rollout_evidence_analysis):
+        raise ContractError("COLLECTION_RECOMMENDATION_ROLLOUT_REVIEW_REQUIRED")
     value = {
         "schema_version": SCHEMA_VERSION,
         "recommendation_id": recommendation_id,
@@ -625,12 +648,47 @@ def build_collection_recommendation(
     return validate_collection_recommendation(value)
 
 
-def _unobserved_selection(source: Mapping[str, Any], report: Mapping[str, Any]) -> dict | None:
+def _rollout_condition(hypothesis, lifecycle_result):
+    """Join the owner's terminal trace to an already qualified exact condition.
+
+    The native lifecycle is the input, never a caller-authored failure score or
+    diagnostic wrapper. Its digest binds checkpoint, recorder and unknowns.
+    """
+    if lifecycle_result is None:
+        return None
+    from tools.data_factory.rollout.evidence_boundary import build_run_diagnostic
+    from tools.fr5_data_factory import validate_motion_program
+    build_run_diagnostic(lifecycle_result)
+    plan = lifecycle_result["plan_envelope"]["plan"]
+    resolved = plan.get("resolved_job_digest")
+    matches = [base for base in hypothesis["base_conditions"]
+               if base["resolved_job_digest"] == resolved]
+    if len(matches) != 1:
+        raise ContractError("COLLECTION_RECOMMENDATION_ROLLOUT_CONDITION_UNAVAILABLE")
+    # The resolver owns condition meaning; matching coordinates alone cannot join
+    # a different calibration, object, camera profile or task to this run.
+    receipt = next(item for item in hypothesis["resolver_receipts"]
+                   if item["resolved_job_digest"] == resolved)
+    program = validate_motion_program(plan.get("learned_source_program"))
+    if (program["resolved_job_digest"] != resolved
+            or plan.get("binding_digests") != program["binding_digests"]
+            or plan.get("robot_system_id") != receipt["normalized_job"]["robot_system_id"]
+            or program["robot_system_id"] != plan["robot_system_id"]
+            or any(program["binding_digests"].get(key) != value
+                   for key, value in receipt["input_digests"].items())):
+        raise ContractError("COLLECTION_RECOMMENDATION_ROLLOUT_CONDITION_BINDING")
+    return canonical_digest(matches[0]["coverage_condition"])
+
+
+def _unobserved_selection(source: Mapping[str, Any], report: Mapping[str, Any],
+                          condition_digest: str | None = None, *, redemonstrate=False) -> dict | None:
     """Choose explicit admitted slots; a count alone cannot target a condition."""
     hypothesis, draft = source["hypothesis"], source["draft"]
     counts = _base_counts(hypothesis)
     missing = {canonical_digest(cell["condition"]) for cell in report["cells"]
                if not cell["counts"]["collected"]}
+    if condition_digest is not None:
+        missing = {condition_digest} if redemonstrate else missing.intersection({condition_digest})
     bases = {base["base_condition_digest"]: base for base in hypothesis["base_conditions"]}
     candidates = sorted(_candidate_slots(hypothesis, 1, _slot_template(draft)),
                         key=lambda item: item["slot_id"])
@@ -671,10 +729,35 @@ def _unobserved_selection(source: Mapping[str, Any], report: Mapping[str, Any]) 
     }
 
 
+def _human_failed_chunk(lifecycle_result):
+    """Existing explicit human chunk review supports a hypothesis, not a cause.
+
+    OneJob.semantic_verdict and PickupExecutor._semantic_verdict own this shape.
+    Neither unreviewed controller faults nor numeric proxies substitute for it.
+    """
+    if lifecycle_result is None:
+        return False
+    evidence = lifecycle_result["execution_evidence"]
+    decision = evidence.get("semantic_decision")
+    return (
+        lifecycle_result.get("code") == "SEMANTIC_FAIL"
+        and lifecycle_result.get("semantic_verdict") == "FAIL"
+        and evidence.get("semantic_verdict") == "FAIL"
+        and evidence["learned_execution"]["status"] == "COMPLETED"
+        and isinstance(decision, dict)
+        and set(decision) == {"source", "decided_by", "decided_at", "review_scope"}
+        and decision["source"] == "HUMAN"
+        and decision["review_scope"] == "FINITE_LEARNED_CHUNK"
+        and isinstance(decision["decided_by"], str) and SAFE_ID.fullmatch(decision["decided_by"]) is not None
+        and isinstance(decision["decided_at"], str) and RFC3339.fullmatch(decision["decided_at"]) is not None
+    )
+
+
 def derive_collection_recommendation(
     *, compiled_authoring: Mapping[str, Any] | None = None,
     episode_evidence: Sequence[Mapping[str, Any]], source_commit: str,
     acquisition: Mapping[str, Any] | None = None,
+    rollout_lifecycle_result: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Measure the retained domain and advise a bounded first coverage pass.
 
@@ -684,11 +767,27 @@ def derive_collection_recommendation(
     from tools.data_factory.campaign_operator import validate_compiled_authoring_evidence
 
     if acquisition is not None:
+        if rollout_lifecycle_result is not None:
+            raise ContractError("COLLECTION_RECOMMENDATION_ROLLOUT_AUTHORING_REQUIRED")
         return _derive_acquisition_recommendation(
             acquisition=acquisition, episode_evidence=episode_evidence, source_commit=source_commit,
         )
     source = validate_compiled_authoring_evidence(compiled_authoring)
     manifest, hypothesis = source["manifest"], source["hypothesis"]
+    condition_digest = _rollout_condition(hypothesis, rollout_lifecycle_result)
+    redemonstrate = _human_failed_chunk(rollout_lifecycle_result)
+    rollout_ref = {
+        "availability": "UNAVAILABLE", "schema_version": None, "analysis_id": None,
+        "analysis_digest": None, "reason_codes": ["NO_CANONICAL_PHYSICAL_ROLLOUT_ANALYSIS"],
+    }
+    if rollout_lifecycle_result is not None:
+        from tools.data_factory.rollout.evidence_boundary import build_run_diagnostic
+        diagnostic = build_run_diagnostic(rollout_lifecycle_result)
+        rollout_ref = {
+            "availability": "AVAILABLE", "schema_version": diagnostic["schema_version"],
+            "analysis_id": diagnostic["run_id"], "analysis_digest": canonical_digest(diagnostic),
+            "reason_codes": [],
+        }
     summaries = _episode_summaries(episode_evidence, manifest, normalize=True)
     bases = {item["base_condition_digest"]: item for item in hypothesis["base_conditions"]}
     jobs = {item["resolved_job_digest"]: item["normalized_job"] for item in hypothesis["resolver_receipts"]}
@@ -724,6 +823,11 @@ def derive_collection_recommendation(
         "basis_claim_ids": [], "reason_codes": [],
     }]
     for reason, subject in UNKNOWN_REASON_SUBJECTS.items():
+        if subject == "rollout" and reason != (
+            "ROLLOUT_DATA_DEFICIT_UNPROVEN" if rollout_lifecycle_result is not None
+            else "NO_CANONICAL_PHYSICAL_ROLLOUT_ANALYSIS"
+        ):
+            continue
         if subject in {"person", "background", "robot", "rollout"} or (
             subject == "semantic" and any(
                 item["state"]["review"]["semantic_status"] == "PENDING" for item in episode_evidence
@@ -731,31 +835,40 @@ def derive_collection_recommendation(
         ):
             claims.append({
                 "claim_id": f"{subject}-unknown", "class": "UNKNOWN", "subject": subject,
-                "value": None, "evidence_refs": [], "basis_claim_ids": [],
+                "value": None, "evidence_refs": (
+                    [rollout_ref["analysis_digest"]] if subject == "rollout" and condition_digest else []
+                ), "basis_claim_ids": [],
                 "reason_codes": [reason],
             })
     # One attempt per unobserved qualified condition is a finite coverage proposal,
     # not an assertion of data sufficiency or a reason to repeat approved cells.
     qualified = {canonical_digest(base["coverage_condition"]) for base in bases.values()}
     missing = [cell for cell in report["cells"] if not cell["counts"]["collected"]
-               and canonical_digest(cell["condition"]) in qualified]
+               and canonical_digest(cell["condition"]) in qualified
+               and (condition_digest is None or canonical_digest(cell["condition"]) == condition_digest)]
     patches = []
-    if any(cell["condition"] == report["suggest_next"] for cell in missing):
+    if redemonstrate or missing and (condition_digest is not None or any(
+        cell["condition"] == report["suggest_next"] for cell in missing
+    )):
         claims.append({
             "claim_id": "coverage-suggested", "class": "SUGGESTED", "subject": "coverage",
-            "value": "COLLECT_MORE", "evidence_refs": [report_digest],
-            "basis_claim_ids": ["coverage-observed"], "reason_codes": ["COVERAGE_DEFICIT"],
+            "value": "REDEMONSTRATE_CONDITION" if redemonstrate else "COLLECT_MORE",
+            "evidence_refs": [report_digest, rollout_ref["analysis_digest"]] if redemonstrate else [report_digest],
+            "basis_claim_ids": ["coverage-observed"],
+            "reason_codes": ["HUMAN_REVIEWED_CHUNK_FAILURE" if redemonstrate else "COVERAGE_DEFICIT"],
         })
-        selection = _unobserved_selection(source, report)
+        selection = _unobserved_selection(source, report, condition_digest, redemonstrate=redemonstrate)
         if selection is not None:
             patches.append({
-                "change_id": "cover-unobserved-conditions", "field": "campaign_selection",
+                "change_id": "reviewed-chunk-redemonstration" if redemonstrate else "cover-unobserved-conditions",
+                "field": "campaign_selection",
                 "value": selection, "basis_claim_ids": ["coverage-suggested"],
             })
     recommendation = build_collection_recommendation(
         recommendation_id="collection-" + canonical_digest({
             "authoring": source["authoring_digest"], "episodes": summaries,
             "quality": report_digest, "source_commit": source_commit,
+            **({"rollout": rollout_ref} if condition_digest is not None else {}),
         })[7:31],
         source_commit=source_commit, campaign_manifest=manifest,
         campaign_hypothesis=hypothesis, campaign_draft=source["draft"],
@@ -766,10 +879,8 @@ def derive_collection_recommendation(
             "analysis_id": report["collection_profile_id"], "analysis_digest": report_digest,
             "reason_codes": [],
         },
-        rollout_evidence_analysis_ref={
-            "availability": "UNAVAILABLE", "schema_version": None, "analysis_id": None,
-            "analysis_digest": None, "reason_codes": ["NO_CANONICAL_PHYSICAL_ROLLOUT_ANALYSIS"],
-        },
+        rollout_evidence_analysis_ref=rollout_ref,
+        rollout_evidence_analysis=rollout_lifecycle_result,
         claims=claims, suggested_draft_patches=patches,
     )
     return report, recommendation
@@ -909,6 +1020,9 @@ def validate_collection_recommendation(
             rollout_evidence_analysis=rollout_evidence_analysis,
             normalize=False,
         )
+        _rollout_condition(campaign_hypothesis, rollout_evidence_analysis)
+        if any(c["value"] == "REDEMONSTRATE_CONDITION" for c in claims) and not _human_failed_chunk(rollout_evidence_analysis):
+            raise ContractError("COLLECTION_RECOMMENDATION_ROLLOUT_REVIEW_REQUIRED")
         if checked_refs != (
             snapshot["data_quality_analysis_ref"],
             snapshot["rollout_evidence_analysis_ref"],
@@ -1032,6 +1146,7 @@ def project_update_draft_intent(
 def project_campaign_update_intent(
     recommendation: object, *, compiled_authoring: Mapping[str, Any],
     operator_view: Mapping[str, Any], data_quality_analysis: Mapping[str, Any],
+    rollout_lifecycle_result: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Project exact condition selection to the existing CampaignOperator CAS.
 
@@ -1046,7 +1161,13 @@ def project_campaign_update_intent(
     source = validate_compiled_authoring_evidence(compiled_authoring)
     _analysis_ref(checked["input_snapshot"]["data_quality_analysis_ref"],
                   owner="data_quality", artifact=data_quality_analysis, normalize=False)
-    selection = _unobserved_selection(source, data_quality_analysis)
+    _analysis_ref(checked["input_snapshot"]["rollout_evidence_analysis_ref"],
+                  owner="rollout", artifact=rollout_lifecycle_result, normalize=False)
+    condition_digest = _rollout_condition(source["hypothesis"], rollout_lifecycle_result)
+    if any(c["value"] == "REDEMONSTRATE_CONDITION" for c in checked["claims"]) and not _human_failed_chunk(rollout_lifecycle_result):
+        raise ContractError("COLLECTION_RECOMMENDATION_ROLLOUT_REVIEW_REQUIRED")
+    selection = _unobserved_selection(source, data_quality_analysis, condition_digest,
+                                      redemonstrate=_human_failed_chunk(rollout_lifecycle_result))
     patches = [patch for patch in checked["suggested_draft_patches"]
                if patch["field"] == "campaign_selection"]
     if (source["manifest"]["manifest_digest"] != checked["input_snapshot"]["campaign"]["manifest_digest"]

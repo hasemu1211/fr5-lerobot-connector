@@ -1,5 +1,36 @@
 ## ADDED Requirements
 
+### Requirement: Terminal rollout evidence reaches bounded native collection advice
+
+Curator SHALL consume an original terminal learned-run lifecycle result using the
+existing Rollout diagnostic builder and qualified campaign resolver evidence.
+It SHALL preserve exact run, checkpoint, plan, condition and recorder provenance,
+task-effectiveness unknowns, and separate semantic, training and motion authority.
+It SHALL distinguish independently measured coverage in the explicitly supplied
+collected evidence from a bounded re-demonstration hypothesis based on existing
+explicit human chunk review. Controller failure alone SHALL establish neither.
+
+#### Scenario: Exact rollout condition has an independently observed coverage gap
+- **WHEN** a canonical terminal lifecycle and retained compiled authoring bind the same qualified condition and DQA observes no collected episode for it in the supplied evidence
+- **THEN** the existing recommendation SHALL offer only that condition subject to existing budget, pins and exclusions
+- **AND** the native CampaignOperator update and compile path SHALL consume the recommendation with fresh lifecycle and view bindings, without starting collection or granting authority.
+
+#### Scenario: Execution status does not establish a data deficit or task success
+- **WHEN** a terminal trace reports either controller failure or completion for an already observed condition without a qualifying explicit human FAIL, or current selection constraints admit no proposed target
+- **THEN** advice SHALL contain no supported collection patch and expose diagnostic insufficiency
+- **AND** task effectiveness and causal data deficit SHALL remain unproven, regardless of recorder disposition or bounded human semantic evidence.
+
+#### Scenario: Human-reviewed unsuccessful chunk supports a bounded re-demonstration hypothesis
+- **WHEN** the original native result records a completed chunk, matching human FAIL verdicts with `FINITE_LEARNED_CHUNK` scope, and `SEMANTIC_FAIL` termination
+- **THEN** advice SHALL permit `REDEMONSTRATE_CONDITION` at that exact qualified condition even when its collected count is nonzero, subject to unchanged native selection constraints
+- **AND** this suggestion SHALL preserve its human-review provenance without asserting whole-task failure, proven data deficit, training authority or physical qualification
+- **AND** absent, proxy, mismatched or differently scoped decisions SHALL NOT justify the re-demonstration claim.
+
+#### Scenario: Missing, mismatched, changed or replayed evidence cannot publish a target
+- **WHEN** a caller supplies a diagnostic without the original lifecycle, lacks retained authoring or qualified condition evidence, changes checkpoint/run/context/recorder bindings, or replays stale recommendation/view input
+- **THEN** the native consumer SHALL reject the missing or mismatched evidence without publishing or applying a collection draft
+- **AND** final source revalidation and exclusive atomic output publication SHALL preserve original dataset, ledgers, lifecycle bytes, approvals and all physical execution gates.
+
 ### Requirement: Controlled view comparison preserves task evidence and consumers
 
 Curator SHALL support controlled comparison of raw and fixed-view inputs using

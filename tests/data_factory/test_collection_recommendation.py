@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 from concurrent.futures import ThreadPoolExecutor
 import json
 import tempfile
@@ -36,7 +37,7 @@ from tools.data_factory.operator.workflow.application import (
 from tools.data_factory.operator.catalog import load_operator_catalog
 from tools.data_factory.operator.web import projection
 from tools.fr5_data_factory import ContractError, canonical_digest
-from .operator.fixtures import draft as campaign_draft, hypothesis
+from .operator.fixtures import draft as campaign_draft, hypothesis, motion
 
 
 COMMIT = "f0f380979d24711acca22e8e53da1e7985e0d7ad"
@@ -625,6 +626,267 @@ class RecommendationFixture:
                 "training_approval": "SEPARATE",
             },
         }
+
+
+def learned_lifecycle(fixture, order=1, *, completed=False, reviewed=False):
+    """CPU-only terminal trace fixture, using native proposal/program contracts.
+
+    This is neither a physical execution observation nor synthetic failure input
+    to recollection.py. The diagnostic owner validates this native result shape.
+    """
+    completed = completed or reviewed
+    from tools.data_factory.learned_action_adapter import fake_rgb
+    from tools.data_factory.rollout.finite_plan import FinitePolicyInference, JOINTS, compile_program
+    from tools.data_factory.rollout.evidence_boundary import build_run_diagnostic
+    xml = '<robot name="synthetic">' + ''.join(
+        f'<joint name="{name}" type="{"prismatic" if i == 6 else "revolute"}">'
+        f'<limit lower="{0 if i == 6 else -3}" upper="{.02 if i == 6 else 3}" velocity="10"/></joint>'
+        for i, name in enumerate(JOINTS)) + '</robot>'
+    checkpoint = {"tree_digest": digest("synthetic-weights"),
+                  "training_receipt_digest": digest("synthetic-receipt"), "runtime": "SYNTHETIC_TEST_ONLY"}
+    action = [.001] * 6 + [.0101]
+    proposal = FinitePolicyInference(
+        lambda _: [action], checkpoint, source_clock=lambda: 10., monotonic_clock=lambda: 1.,
+    ).propose({
+        "source_clock": "SYSTEM_TIME", "source_timestamps_s": dict.fromkeys(("state", "camera1", "camera2"), 10.),
+        "observation.state": [0.] * 6 + [.01],
+        "observation.images.camera1": fake_rgb(), "observation.images.camera2": fake_rgb(),
+    }, instruction="synthetic pickup", robot_description=xml, period_s=.1)
+    source = motion()
+    source["resolved_job_digest"] = fixture.hypothesis["base_conditions"][order]["resolved_job_digest"]
+    receipt = next(r for r in fixture.hypothesis["resolver_receipts"]
+                   if r["resolved_job_digest"] == source["resolved_job_digest"])
+    source["robot_system_id"] = receipt["normalized_job"]["robot_system_id"]
+    source["binding_digests"].update(receipt["input_digests"])
+    source["binding_digests"]["robot_description_digest"] = "sha256:" + hashlib.sha256(xml.encode()).hexdigest()
+    program = compile_program(source, proposal)
+    plan = {
+        "schema_version": "fr5.pickup_plan.v3", "run_id": "synthetic-learned-run",
+        "motion_program_digest": digest(program), "resolved_job_digest": source["resolved_job_digest"],
+        "robot_system_id": source["robot_system_id"], "binding_digests": source["binding_digests"],
+        "learned_source_program": source, "learned_proposal": proposal, "steps": program["steps"],
+    }
+    trace = redigest({
+        "schema_version": "data_factory.finite_learned_execution.v1",
+        "proposal_digest": proposal["proposal_digest"], "plan_digest": digest(plan), "checkpoint": checkpoint,
+        "status": "COMPLETED" if completed else "FAILED",
+        "failure_code": None if completed else "CONTROLLER_FAULT",
+        "terminal_state": action if completed else None,
+        "terminal_phases": ["LEARNED_CHUNK"] if completed else [],
+        "task_effectiveness": "UNKNOWN", "scene_outcome": "UNKNOWN",
+        "cell_ready": False, "online_policy_authorized": False,
+    }, "trace_digest")
+    result = {
+        "ok": False, "code": "PRECOMMIT_SAFETY" if completed else "CONTROLLER_FAULT", "state": "ABORTED",
+        "run_id": plan["run_id"], "plan_digest": digest(plan), "plan_envelope": {"plan": plan},
+        "recorder_state": "ABORTED", "recorder_evidence": {"state": "ABORTED"},
+        "execution_evidence": {"learned_execution": trace}, "semantic_verdict": "PENDING",
+    }
+    if reviewed:
+        # Shape recorded by the native semantic_verdict API after chunk completion;
+        # this explicit fixture is not a real human decision or task-success label.
+        result.update(code="SEMANTIC_FAIL", semantic_verdict="FAIL")
+        result["execution_evidence"].update(semantic_verdict="FAIL", semantic_decision={
+            "source": "HUMAN", "decided_by": "synthetic-reviewer", "decided_at": "2026-09-04T05:00:00Z",
+            "review_scope": "FINITE_LEARNED_CHUNK",
+        })
+    build_run_diagnostic(result)
+    return result
+
+
+class RolloutRecommendationTests(unittest.TestCase):
+    def test_terminal_diagnostic_reaches_native_draft_and_compile(self):
+        for reviewed in (False, True):
+            with self.subTest(reviewed=reviewed):
+                self._native_draft(reviewed)
+
+    def _native_draft(self, reviewed):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = RecommendationFixture(dataset_root=str(root / "data"), evidence_root=str(root / "runs"))
+            runs = fixture.store()
+            order = 0 if reviewed else 1
+            lifecycle = learned_lifecycle(fixture, order=order, reviewed=reviewed)
+            path = root / "learned" / "learned_lifecycle_result.json"
+            path.parent.mkdir()
+            path.write_text(json.dumps(lifecycle))
+            before = {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}
+            arguments = dict(run_directories=runs[:1], source_commit=COMMIT,
+                             rollout_lifecycle_path=path, output_root=root / "advice")
+            result = recommend_stored_collection(**arguments)
+            self.assertEqual(result["availability"], "AVAILABLE", result)
+            self.assertEqual(result, recommend_stored_collection(**arguments))
+            diagnostic = result["rollout_evidence_analysis"]
+            self.assertEqual(diagnostic["checkpoint"], lifecycle["execution_evidence"]["learned_execution"]["checkpoint"])
+            self.assertEqual(diagnostic["lifecycle_result_digest"], digest(lifecycle))
+            self.assertEqual(diagnostic["task_effectiveness"], "UNKNOWN")
+            self.assertEqual(diagnostic["physical_qualification"], "UNKNOWN")
+            self.assertFalse(diagnostic["training_authorized"])
+            advice = result["recommendation"]
+            self.assertEqual(advice["authority"], AUTHORITY)
+            suggestion = next(c for c in advice["claims"] if c["class"] == "SUGGESTED")
+            self.assertEqual(suggestion["value"], "REDEMONSTRATE_CONDITION" if reviewed else "COLLECT_MORE")
+            self.assertEqual(next(c for c in advice["claims"] if c["subject"] == "rollout")["reason_codes"],
+                             ["ROLLOUT_DATA_DEFICIT_UNPROVEN"])
+            factory = mock.Mock(side_effect=AssertionError("no collection effects"))
+            application = CampaignOperator(
+                session_id="rollout-recommendation", lifecycle_owner="TEST_OPERATOR",
+                workspace={"identity": "SYNTHETIC"}, hypothesis=fixture.hypothesis, draft=fixture.draft,
+                effect_scope="FAKE", lifecycle_action="AUTHOR_ONLY", data_disposition="TEST_ONLY",
+                subsystems={"planner": {"readiness": "READY", "capability": "AUTHOR", "reason": "SYNTHETIC"}},
+                expires_at="2099-01-01T00:00:00Z", initial_scene_digest=digest("scene"),
+                scene_evidence_call=factory, side_effect_counter_call=lambda: dict.fromkeys(SIDE_EFFECT_COUNTERS, 0),
+                fake_lifecycle_factory=factory, clock=lambda: NOW,
+            )
+            intent_args = dict(compiled_authoring=fixture.authoring(), operator_view=application.core.snapshot(),
+                               data_quality_analysis=result["data_quality_analysis"])
+            with self.assertRaisesRegex(ContractError, "ROLLOUT_LIFECYCLE_REQUIRED"):
+                project_campaign_update_intent(advice, **intent_args)
+            intent = project_campaign_update_intent(advice, **intent_args, rollout_lifecycle_result=lifecycle)
+            changed = copy.deepcopy(lifecycle)
+            changed["code"] = "OTHER_TERMINAL_REASON"
+            with self.assertRaisesRegex(ContractError, "ANALYSIS_DIGEST"):
+                project_campaign_update_intent(advice, **intent_args, rollout_lifecycle_result=changed)
+            application.core.consume(intent)
+            with self.assertRaisesRegex(ContractError, "STALE_VIEW"):
+                application.core.consume({**intent, "intent_id": "replayed-rollout-advice"})
+            view = application.core.snapshot()
+            application.core.consume({**intent, "intent_id": "compile-rollout-target", "op": "compile_draft",
+                                      "view_revision": view["revision"], "view_digest": view["view_digest"], "payload": {}})
+            self.assertEqual([s["base_condition_digest"] for s in application.manifest["slots"]],
+                             [fixture.hypothesis["base_conditions"][order]["base_condition_digest"]])
+            factory.assert_not_called()
+            self.assertFalse(any(application.projection()["side_effect_counters"].values()))
+            self.assertTrue(all(p.read_bytes() == original for p, original in before.items()))
+            self.assertEqual(set(p.name for p in Path(result["output_path"]).iterdir()),
+                             {"coverage_report.json", "collection_recommendation.json", "rollout_diagnostic.json"})
+            with mock.patch("sys.stdout") as stdout:
+                self.assertEqual(recommend_main([
+                    "--run-dir", str(runs[0]), "--source-commit", COMMIT,
+                    "--rollout-lifecycle", str(path), "--expected-recommendation-digest", advice["recommendation_digest"],
+                ]), 0)
+            emitted = json.loads("".join(c.args[0] for c in stdout.write.call_args_list))
+            self.assertEqual(emitted["recommendation"], advice)
+
+    def test_controller_failure_or_completion_does_not_imply_data_deficit(self):
+        fixture = RecommendationFixture()
+        for completed in (False, True):
+            with self.subTest(completed=completed):
+                lifecycle = learned_lifecycle(fixture, order=0, completed=completed)
+                _, advice = derive_collection_recommendation(
+                    compiled_authoring=fixture.authoring(), episode_evidence=fixture.evidence,
+                    source_commit=COMMIT, rollout_lifecycle_result=lifecycle,
+                )
+                self.assertEqual(advice["suggested_draft_patches"], [])
+                self.assertFalse(any(c["class"] == "SUGGESTED" for c in advice["claims"]))
+                self.assertEqual(next(c for c in advice["claims"] if c["subject"] == "rollout")["class"], "UNKNOWN")
+
+    def test_proxy_absent_or_different_scope_review_cannot_author_redemonstration(self):
+        fixture = RecommendationFixture()
+        lifecycle = learned_lifecycle(fixture, order=0, reviewed=True)
+        args = dict(compiled_authoring=fixture.authoring(), episode_evidence=fixture.evidence, source_commit=COMMIT)
+        mutations = [
+            lambda r: r["execution_evidence"]["semantic_decision"].update(source="HIL_PROXY"),
+            lambda r: r["execution_evidence"].pop("semantic_decision"),
+            lambda r: r["execution_evidence"]["semantic_decision"].update(review_scope="FULL_TASK"),
+            lambda r: r["execution_evidence"].update(semantic_verdict="PASS"),
+            lambda r: r.update(semantic_verdict="PASS"),
+        ]
+        for mutate in mutations:
+            changed = copy.deepcopy(lifecycle)
+            mutate(changed)
+            _, advice = derive_collection_recommendation(**args, rollout_lifecycle_result=changed)
+            self.assertEqual(advice["suggested_draft_patches"], [])
+        # Rewording a canonical coverage claim cannot invent a human review.
+        unreviewed = learned_lifecycle(fixture)
+        report, advice = derive_collection_recommendation(**args, rollout_lifecycle_result=unreviewed)
+        claim = next(c for c in advice["claims"] if c["class"] == "SUGGESTED")
+        claim.update(value="REDEMONSTRATE_CONDITION", reason_codes=["HUMAN_REVIEWED_CHUNK_FAILURE"],
+                     evidence_refs=sorted([digest(report), advice["input_snapshot"]["rollout_evidence_analysis_ref"]["analysis_digest"]]))
+        redigest(advice, "recommendation_digest")
+        with self.assertRaisesRegex(ContractError, "ROLLOUT_REVIEW_REQUIRED"):
+            validate_collection_recommendation(advice, campaign_manifest=fixture.manifest,
+                campaign_hypothesis=fixture.hypothesis, campaign_draft=fixture.draft,
+                campaign_compilation_receipt=fixture.receipt, episode_evidence=fixture.evidence,
+                data_quality_analysis=report, rollout_evidence_analysis=unreviewed)
+
+    def test_tampering_missing_condition_and_stale_source_do_not_publish(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = RecommendationFixture(dataset_root=str(root / "data"), evidence_root=str(root / "runs"))
+            runs = fixture.store()
+            original = learned_lifecycle(fixture)
+            path = root / "lifecycle.json"
+            def invoke(value, **extra):
+                path.write_text(json.dumps(value))
+                return recommend_stored_collection(run_directories=runs[:1], source_commit=COMMIT,
+                    rollout_lifecycle_path=path, output_root=root / "advice", **extra)
+            changes = [
+                lambda r: r.update(run_id="different-run"),
+                lambda r: r["execution_evidence"]["learned_execution"]["checkpoint"].update(tree_digest=digest("other")),
+                lambda r: r["recorder_evidence"].update(state="FROZEN"),
+                lambda r: r["plan_envelope"]["plan"].update(resolved_job_digest=digest("other-condition")),
+                lambda r: r["execution_evidence"]["learned_execution"].update(task_effectiveness="PASS"),
+            ]
+            for mutate in changes:
+                value = copy.deepcopy(original)
+                mutate(value)
+                self.assertEqual(invoke(value)["availability"], "UNAVAILABLE")
+                self.assertFalse((root / "advice").exists())
+            # Even a self-consistent trace cannot invent a qualified condition.
+            value = copy.deepcopy(original)
+            value["plan_envelope"]["plan"]["resolved_job_digest"] = digest("unknown-condition")
+            value["plan_digest"] = digest(value["plan_envelope"]["plan"])
+            value["execution_evidence"]["learned_execution"]["plan_digest"] = value["plan_digest"]
+            redigest(value["execution_evidence"]["learned_execution"], "trace_digest")
+            self.assertEqual(invoke(value)["reason_codes"], ["COLLECTION_RECOMMENDATION_ROLLOUT_CONDITION_UNAVAILABLE"])
+            self.assertFalse((root / "advice").exists())
+            from tools.data_factory.rollout.evidence_boundary import build_run_diagnostic
+            self.assertEqual(invoke(build_run_diagnostic(original))["availability"], "UNAVAILABLE")
+            self.assertFalse((root / "advice").exists())
+            self.assertEqual(invoke(original, expected_recommendation_digest=digest("old-advice"))["availability"], "UNAVAILABLE")
+            self.assertFalse((root / "advice").exists())
+
+    def test_changed_native_sources_are_rechecked_before_publication(self):
+        from tools.data_factory import collection_recommendation_io as io
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = RecommendationFixture(dataset_root=str(root / "data"), evidence_root=str(root / "runs"))
+            runs = fixture.store()
+            lifecycle = learned_lifecycle(fixture)
+            path = root / "learned" / "learned_lifecycle_result.json"
+            path.parent.mkdir()
+            path.write_text(json.dumps(lifecycle))
+            source_before = {p: p.read_bytes() for p in (root / "data").rglob("*") if p.is_file()}
+            derive = io.derive_collection_recommendation
+            def replace_after_read(**kwargs):
+                result = derive(**kwargs)
+                path.write_text(json.dumps({**lifecycle, "code": "REPLACED"}))
+                return result
+            with mock.patch.object(io, "derive_collection_recommendation", side_effect=replace_after_read):
+                result = io.recommend_stored_collection(run_directories=runs[:1], source_commit=COMMIT,
+                    rollout_lifecycle_path=path, output_root=root / "advice")
+            self.assertEqual(result["reason_codes"], ["COLLECTION_RECOMMENDATION_ROLLOUT_INPUT_CHANGED"])
+            self.assertFalse((root / "advice").exists())
+            self.assertTrue(all(p.read_bytes() == value for p, value in source_before.items()))
+
+    def test_qualified_condition_context_mismatch_and_acquisition_mode_reject(self):
+        fixture = RecommendationFixture()
+        lifecycle = learned_lifecycle(fixture)
+        args = dict(compiled_authoring=fixture.authoring(), episode_evidence=fixture.evidence[:1], source_commit=COMMIT)
+        with self.assertRaisesRegex(ContractError, "ROLLOUT_AUTHORING_REQUIRED"):
+            derive_collection_recommendation(**args, acquisition={}, rollout_lifecycle_result=lifecycle)
+        for key in ("selected_sheet", "collection_profile", "cell_calibration", "object_profile"):
+            with self.subTest(key=key):
+                changed = copy.deepcopy(lifecycle)
+                plan = changed["plan_envelope"]["plan"]
+                plan["learned_source_program"]["binding_digests"][key] = digest("other-context")
+                plan["binding_digests"][key] = digest("other-context")
+                changed["plan_digest"] = digest(plan)
+                changed["execution_evidence"]["learned_execution"]["plan_digest"] = digest(plan)
+                redigest(changed["execution_evidence"]["learned_execution"], "trace_digest")
+                with self.assertRaisesRegex(ContractError, "ROLLOUT_CONDITION_BINDING"):
+                    derive_collection_recommendation(**args, rollout_lifecycle_result=changed)
 
 
 class CollectionRecommendationTests(unittest.TestCase):

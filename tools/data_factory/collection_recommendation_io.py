@@ -132,6 +132,7 @@ def recommend_stored_collection(
     output_root: str | Path | None = None,
     acquisition: dict | None = None,
     expected_recommendation_digest: str | None = None,
+    rollout_lifecycle_path: str | Path | None = None,
 ) -> dict:
     """Load canonical run evidence and optionally publish immutable derived files.
 
@@ -140,6 +141,8 @@ def recommend_stored_collection(
     Legacy mode requires retained compiled authoring. Acquisition mode uses each
     run's canonical ledger/manifest and explicit current caller inputs; it never
     reconstructs missing historical authoring or claims current execution rights.
+    Optional rollout input is the original terminal OneJob result. The rollout
+    owner rederives its diagnostic; a free-floating diagnostic is insufficient.
     """
     if not run_directories:
         raise ContractError("COLLECTION_RECOMMENDATION_RUNS_REQUIRED")
@@ -148,6 +151,16 @@ def recommend_stored_collection(
         sources = None
         evidence = []
         protected = set()
+        lifecycle = None
+        diagnostic = None
+        if rollout_lifecycle_path is not None:
+            from tools.data_factory.rollout.evidence_boundary import build_run_diagnostic
+            lifecycle_path = Path(rollout_lifecycle_path)
+            if lifecycle_path.is_symlink():
+                raise ContractError("COLLECTION_RECOMMENDATION_ROLLOUT_SOURCE_PATH")
+            lifecycle = load_json_strict(lifecycle_path)
+            diagnostic = build_run_diagnostic(lifecycle)
+            protected.add(lifecycle_path.resolve(strict=True).parent)
         context = None if acquisition is None else _acquisition_context(acquisition)
         roots = []
         for directory in run_directories:
@@ -169,7 +182,13 @@ def recommend_stored_collection(
         report, recommendation = derive_collection_recommendation(
             compiled_authoring=sources, episode_evidence=evidence, source_commit=source_commit,
             **({"acquisition": context} if context is not None else {}),
+            rollout_lifecycle_result=lifecycle,
         )
+        if lifecycle is not None:
+            if (lifecycle_path.is_symlink() or load_json_strict(lifecycle_path) != lifecycle
+                    or any(_load_run(root)[0] != previous for root, previous in zip(roots, evidence))
+                    or any(load_json_strict(root / "compiled_authoring_evidence.json") != sources for root in roots)):
+                raise ContractError("COLLECTION_RECOMMENDATION_ROLLOUT_INPUT_CHANGED")
         if context is not None:
             protected.add(Path(acquisition["scene_state_path"]).resolve(strict=True).parent)
             if (_acquisition_context(acquisition) != context
@@ -194,13 +213,19 @@ def recommend_stored_collection(
             raise ContractError("COLLECTION_RECOMMENDATION_OUTPUT_OVERLAP")
         destination = destination / recommendation["recommendation_digest"].removeprefix("sha256:")
         documents = {"coverage_report.json": report, "collection_recommendation.json": recommendation}
+        if diagnostic is not None:
+            documents["rollout_diagnostic.json"] = diagnostic
         _publish(destination, documents)
         output_path = str(destination)
     return {
-        "availability": "AVAILABLE", "reason_codes": [],
+        "availability": "AVAILABLE", "reason_codes": (
+            ["COLLECTION_RECOMMENDATION_ROLLOUT_NO_SUPPORTED_COLLECTION_PATCH"]
+            if diagnostic is not None and not recommendation["suggested_draft_patches"] else []
+        ),
         "data_quality_analysis": report, "recommendation": recommendation,
         "output_path": output_path,
         "implementation_provenance": provenance,
+        **({"rollout_evidence_analysis": diagnostic} if diagnostic is not None else {}),
     }
 
 
@@ -213,6 +238,7 @@ def main(argv=None) -> int:
     parser.add_argument("--output-root", help="optional exclusive derived output root")
     parser.add_argument("--acquisition-input", help="saved native catalog/selection, budget and canonical scene reference")
     parser.add_argument("--expected-recommendation-digest", help="reject stale advice before publication")
+    parser.add_argument("--rollout-lifecycle", help="original terminal learned_lifecycle_result.json (requires retained campaign authoring)")
     try:
         args = parser.parse_args(argv)
         discovery = None if args.run_root is None else discover_stored_collection(args.run_root)
@@ -226,6 +252,7 @@ def main(argv=None) -> int:
             output_root=args.output_root,
             acquisition=None if args.acquisition_input is None else load_json_strict(args.acquisition_input),
             expected_recommendation_digest=args.expected_recommendation_digest,
+            rollout_lifecycle_path=args.rollout_lifecycle,
         )
         if discovery is not None:
             result["discovery"] = discovery
