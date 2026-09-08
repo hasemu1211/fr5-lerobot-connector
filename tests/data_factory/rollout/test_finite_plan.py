@@ -582,7 +582,12 @@ class FinitePlanTest(unittest.TestCase):
             compile_program(src, p)
 
     def test_recorded4032_percent_references_reach_native_consumers_with_declared_changes(self):
-        self._recorded_reference_replay(True)
+        from tools.data_factory.quality.phase_events import validate_phase_event_sequence
+        plan, events = self._recorded_reference_replay(True)
+        self.assertEqual(validate_phase_event_sequence(events, plan=plan), events)
+        event = next(item for item in events if item["event"] == "GOAL_ACCEPTED")
+        with self.assertRaisesRegex(ContractError, "PHASE_EVENT_SEGMENT_BINDING"):
+            validate_phase_event_sequence([{**event, "evidence_digest": "sha256:" + "0" * 64}], plan=plan)
 
     def _recorded_reference_replay(self, quantize):
         data = json.loads(Path(__file__).with_name("recorded4032.json").read_text())
@@ -653,8 +658,7 @@ class FinitePlanTest(unittest.TestCase):
         broken["trace_digest"] = canonical_digest({k: v for k, v in broken.items() if k != "trace_digest"})
         with self.assertRaisesRegex(ContractError, "LEARNED_TRACE_BINDING"):
             validate_execution_trace(plan, broken)
-        # Root integrates the Quality enum compatibility separately. This returns
-        # actual executor events for that existing validator, without a fake PASS.
+        # Return the actual executor events for the existing Quality consumer.
         return plan, events
 
     def test_serialized_references_deadline_and_changed_initial_reference_send_no_next_goal(self):
