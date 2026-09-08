@@ -126,10 +126,11 @@ class RosMoveItTransport:
         import cv2
         import numpy as np
         from tools.data_factory.rollout.finite_plan import check_freshness
+        from tools.data_factory.readiness import RECORDER_READINESS_CONTRACT
         try:
             proposal = plan["learned_proposal"]
             inputs = proposal["runtime_inputs"]
-            camera = inputs["camera_mapping"]["observation.images.up"]
+            camera = inputs["camera_mapping"]["observation.images." + RECORDER_READINESS_CONTRACT["scene_camera"]]
             slot = camera.removeprefix("observation.images.")
             if camera not in {"observation.images.camera1", "observation.images.camera2"}:
                 raise ValueError("scene camera mapping")

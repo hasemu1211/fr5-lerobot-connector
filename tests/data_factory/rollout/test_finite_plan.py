@@ -2186,7 +2186,8 @@ class FinitePlanTest(unittest.TestCase):
         self._native_mechanical_terminal_case()
 
     def test_native_mechanical_terminal_rejection_boundaries(self):
-        for failure in ("stale_contact","dark","scope","scene","revoke","partial_feedback","incarnation"):
+        for failure in ("stale_contact","dark","scope","scene","revoke","partial_feedback","incarnation",
+                        "dark_dispatch", "stale_dispatch", "expired_during_decode", "dark_staged_open"):
             with self.subTest(failure=failure):
                 self._native_mechanical_terminal_case(failure)
 
@@ -2198,7 +2199,7 @@ class FinitePlanTest(unittest.TestCase):
         from shape_msgs.msg import SolidPrimitive
         from trajectory_msgs.msg import JointTrajectoryPoint
         from rclpy.serialization import serialize_message
-        job, executor, transport, state, now, sent, _, calls = self.make_held_job(mechanical=True)
+        job, executor, transport, state, now, sent, _, calls = self.make_held_job(mechanical=True, max_observation_age_s=.3)
         for name in ("CollisionObject", "PlanningScene", "PlanningSceneComponents", "RobotState"):
             setattr(transport, "_"+name, getattr(msg,name))
         for name in ("ApplyPlanningScene", "GetPlanningScene", "GetStateValidity"):
@@ -2244,12 +2245,36 @@ class FinitePlanTest(unittest.TestCase):
             return {"terminal_status":"SUCCEEDED","moveit_success":True,
                     "serialized_trajectory":serialize_message(trajectory),"final_joint_state":list(joints or start)}
         transport.plan_arm=plan_arm
+        illumination_captures = []
+        def illumination_sample():
+            return {"kind": "CURRENT_REQUIRED_ILLUMINATION", "camera_topic": "/up",
+                    "brightness_mean": 100., "source_timestamp_s": now[0], "valid_until_s": now[0] + .3}
+        def capture_illumination(plan):
+            self.assertIsNone(transport._active)
+            self.assertFalse(transport._execution_locked)
+            illumination_captures.append(now[0])
+            sample = illumination_sample()
+            if failure == "dark_dispatch" or failure == "dark_staged_open" and len(illumination_captures) == 4:
+                sample["brightness_mean"] = 0.
+            if failure == "stale_dispatch":
+                sample["source_timestamp_s"] -= 1.
+                sample["valid_until_s"] -= 1.
+            return sample
+        transport.capture_scene_illumination = capture_illumination
+        if failure == "expired_during_decode":
+            decode = transport._compiled_execution_goal
+            def delayed_decode(step):
+                result = decode(step)
+                if step["phase"] != "LEARNED_CHUNK":
+                    now[0] += .4
+                return result
+            transport._compiled_execution_goal = delayed_decode
         def simulated_contact(plan,scene,snapshot):
             context={"status":"AVAILABLE","semantics":"MODEL_BASED_EXPECTATION","physical_success":False,
                 "source_program_digest":canonical_digest(plan["learned_source_program"]),
                 "snapshot_digest":canonical_digest(snapshot),"scene_binding":copy.deepcopy(plan["scene_binding"]),
                 "qualification_source_digest":plan["binding_digests"]["motion_qualification"],"valid_until_s":90.,
-                "illumination":{"kind":"CURRENT_REQUIRED_ILLUMINATION","brightness_mean":100.},
+                "illumination":illumination_sample(),
                 "carried_object":{"object_id":"cube-1","link_name":"gripper_link",
                     "touch_links":["finger_tip_right_link","finger_tip_left_link"],"dimensions_m":[.024]*3,
                     "translation_m":[0.,0.,.1],"rotation_xyzw":[0.,0.,0.,1.]}}
@@ -2294,14 +2319,15 @@ class FinitePlanTest(unittest.TestCase):
                     return result
                 job.recorder_call=revoke_on_freeze
             result=job.task_boundary()
-            if failure in {"stale_contact","dark","scope","scene","revoke"}:
+            if failure in {"stale_contact","dark","scope","scene","revoke",
+                           "dark_dispatch", "stale_dispatch", "expired_during_decode"}:
                 self.assertFalse(result["ok"])
                 self.assertEqual(len(sent),learned_count)
                 self.assertIn(("recorder","retain"),calls)
                 self.assertNotIn(("recorder","commit"),calls)
                 if failure in {"stale_contact","dark","scope"}: self.assertEqual(services,[])
                 return
-            self.assertEqual(result["code"],"MECHANICAL_TERMINAL_STARTED",result)
+            self.assertEqual(result["code"],"MECHANICAL_TERMINAL_STARTED")
             self.assertEqual(job.recorder_state,"FROZEN")
             self.assertEqual(starts[0],[.001]*6)
             for index in range(6):
@@ -2315,7 +2341,8 @@ class FinitePlanTest(unittest.TestCase):
                         return original_poll()
                     job.poll=bad_feedback
                 result=complete_goal()
-                if failure=="incarnation" and index==0 or failure=="partial_feedback" and index==2:
+                if (failure=="incarnation" and index==0 or failure=="partial_feedback" and index==2
+                        or failure=="dark_staged_open" and index==2):
                     self.assertFalse(result["ok"])
                     self.assertEqual(len(sent)-learned_count,index+1)
                     self.assertIn(("recorder","retain"),calls)
@@ -2327,6 +2354,9 @@ class FinitePlanTest(unittest.TestCase):
             self.assertEqual(terminal["status"],"COMPLETED",(result["code"],terminal.get("failure_code")))
             self.assertEqual(terminal["terminal_phases"],["RECYCLE_APPROACH_PTP","LOWER_LIN","GRIPPER_OPEN","RETREAT_LIN","SAFE_POSE_PTP"])
             self.assertEqual(len(sent)-learned_count,6)
+            self.assertEqual(len(illumination_captures), 6)
+            self.assertGreater(now[0], terminal["plan"]["contact_evidence"]["illumination"]["valid_until_s"])
+            self.assertEqual(terminal["last_illumination"]["source_timestamp_s"], illumination_captures[-1])
             self.assertEqual([sent[learned_count+i].trajectory.points[-1].positions[0] for i in (2,3)],[.0126,.021])
             self.assertEqual(executor.runs["run"]["plan"],original)
             self.assertEqual(executor.runs["run"]["task_deadline"],deadline)

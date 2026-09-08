@@ -6,10 +6,25 @@ native transport owns the measured contact evidence; absence is unavailable.
 import base64
 import copy
 import math
+import time
 
 from tools.fr5_data_factory import ContractError, canonical_digest, validate_motion_program
+from tools.data_factory.readiness import RECORDER_READINESS_CONTRACT
 
 PHASES = ("RECYCLE_APPROACH_PTP", "LOWER_LIN", "GRIPPER_OPEN", "RETREAT_LIN", "SAFE_POSE_PTP")
+
+
+def check_illumination(sample, parent_plan, now):
+    """Check source age at the boundary/send, never extend a source timestamp."""
+    if (not isinstance(sample, dict) or sample.get("kind") != "CURRENT_REQUIRED_ILLUMINATION"
+            or type(sample.get("brightness_mean")) not in (int, float)
+            or not RECORDER_READINESS_CONTRACT["min_scene_brightness"] <= sample["brightness_mean"] <= 255):
+        raise ContractError("MECHANICAL_ILLUMINATION_UNAVAILABLE")
+    stamp, expiry = sample.get("source_timestamp_s"), sample.get("valid_until_s")
+    age = parent_plan["learned_proposal"]["max_observation_age_s"]
+    if (any(type(v) not in (int, float) or not math.isfinite(v) for v in (stamp, expiry, now, age))
+            or not 0 < age <= 5 or expiry != stamp + age or not stamp <= now < expiry):
+        raise ContractError("MECHANICAL_ILLUMINATION_STALE")
 
 
 def validate_terminal_evidence(value, parent_plan):
@@ -42,11 +57,9 @@ def compile_terminal(transport, *, plan, grant, snapshot, contact, remaining_s):
             or contact.get("physical_success") is not False):
         raise ContractError("MECHANICAL_CONTACT_UNAVAILABLE")
     illumination = contact.get("illumination")
-    if (type(contact.get("valid_until_s")) not in (int,float) or not math.isfinite(contact["valid_until_s"])
-            or not isinstance(illumination,dict) or illumination.get("kind") != "CURRENT_REQUIRED_ILLUMINATION"
-            or type(illumination.get("brightness_mean")) not in (int,float)
-            or not 20 <= illumination["brightness_mean"] <= 255):
-        raise ContractError("MECHANICAL_ILLUMINATION_UNAVAILABLE")
+    check_illumination(illumination, plan, time.time())
+    if type(contact.get("valid_until_s")) not in (int,float) or not math.isfinite(contact["valid_until_s"]):
+        raise ContractError("MECHANICAL_CONTACT_STALE")
     steps = [copy.deepcopy(step) for step in source["steps"] if step["phase"] in PHASES]
     if tuple(step["phase"] for step in steps) != PHASES:
         raise ContractError("MECHANICAL_TERMINAL_SCOPE")

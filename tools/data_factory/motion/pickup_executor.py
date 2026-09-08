@@ -1107,8 +1107,17 @@ class PickupExecutor:
         terminal = run.get("mechanical_terminal")
         return terminal["plan"]["steps"] if terminal and terminal["status"] != "PLANNED" else run["plan"]["steps"]
 
+    def _capture_mechanical_illumination(self, run):
+        from tools.data_factory.motion.mechanical_terminal import check_illumination
+        sample = self.transport.capture_scene_illumination(run["plan"])
+        # Retain the actual rejected/accepted sample for terminal diagnosis.
+        run["mechanical_terminal"]["last_illumination"] = sample
+        check_illumination(sample, run["plan"], self.source_clock())
+
     def _check_mechanical_dispatch(self, run, step):
         self._check_learned_dispatch(run)
+        from tools.data_factory.motion.mechanical_terminal import check_illumination
+        check_illumination(run["mechanical_terminal"].get("last_illumination"), run["plan"], self.source_clock())
         terminal = run["mechanical_terminal"]["plan"]
         contact = terminal["contact_evidence"]
         if self.source_clock() >= contact["valid_until_s"]:
@@ -1643,6 +1652,8 @@ class PickupExecutor:
                         if execution.get("learned_segments"):
                             from tools.data_factory.rollout.gripper_evidence import check_transition
                             check_transition(execution["learned_segments"][-1]["terminal_observation"], evidence, command=False)
+                if "mechanical_terminal" in run:
+                    self._capture_mechanical_illumination(run)
                 execution["active"] = True
                 self._emit_phase_event(run, "DISPATCH_REQUESTED", step, "REQUESTED", {"step": step})
                 if step["phase"] == "LEARNED_CHUNK":
@@ -1838,6 +1849,7 @@ class PickupExecutor:
                         try:
                             if "mechanical_terminal" in run:
                                 with self._learned_dispatch_scene(run):
+                                    self._capture_mechanical_illumination(run)
                                     self.transport.start_phase(continued_step, cancel_event=run["cancel_event"],
                                         cancel_timeout_s=run["plan"]["execution_timeouts_s"]["cancel"],
                                         dispatch_guard=lambda: self._check_mechanical_dispatch(run, continued_step))
