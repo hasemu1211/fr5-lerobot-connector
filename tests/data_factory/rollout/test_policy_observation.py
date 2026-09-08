@@ -85,6 +85,46 @@ class PolicyObservationTest(unittest.TestCase):
                 self.assertEqual(error.exception.code, code)
             self.assertCountEqual(self.destroyed, list(self.callbacks))
 
+    def test_capture_retry_cache_retains_one_body_and_never_recaptures_retired_ids(self):
+        clock, calls = [100., 20.], []
+        def capture(*_):
+            calls.append(True)
+            return {"source_timestamps_s": dict.fromkeys(("state", "camera1", "camera2"), clock[0]),
+                    "observation.images.camera1": {"data_hex": "010203"},
+                    "observation.images.camera2": {"data_hex": "040506"}}
+        executor = PickupExecutor(SimpleNamespace(capture_policy_observation=capture),
+                                  source_clock=lambda: clock[0], monotonic_clock=lambda: clock[1])
+        request = {"schema_version": "fr5.pickup_executor.command.v4", "op_id": "capture-0",
+                   "op": "capture_observation", "payload": {"camera_topics": {"camera1": "/up", "camera2": "/wrist"},
+                                                            "max_observation_age_s": .3}}
+        original = executor.process(request)
+        self.assertEqual(executor.process(request), original)
+        self.assertEqual(len(calls), 1)
+        for index in range(1, 8):
+            self.assertTrue(executor.process({**request, "op_id": f"capture-{index}"})["ok"])
+            bodies = [response for _, response in executor.cache.values()
+                      if isinstance(response.get("data"), dict) and "observation" in response["data"]]
+            self.assertEqual(len(bodies), 1)
+        self.assertEqual(executor.process(request)["code"], "LEARNED_OBSERVATION_RETIRED")
+        self.assertEqual(len(calls), 8)
+        self.assertIn("observation", original["data"])  # caller's returned value is immutable
+        changed = {**request, "payload": {**request["payload"], "max_observation_age_s": .2}}
+        self.assertEqual(executor.process(changed)["code"], "OP_ID_CONFLICT")
+        clock[1] += .31  # paused source clock cannot preserve a cached image
+        expired = executor.process({**request, "op_id": "capture-7"})
+        self.assertEqual(expired["code"], "LEARNED_STALE_OBSERVATION")
+        self.assertFalse(expired["ok"])
+        self.assertIsNone(expired["data"])
+        self.assertEqual(len(calls), 8)
+        self.assertTrue(all(response["data"] is None for _, response in executor.cache.values()))
+        self.assertTrue(executor.process({**request, "op_id": "source-age"})["ok"])
+        clock[0] += 1.
+        self.assertEqual(executor.process({**request, "op_id": "source-age"})["code"], "LEARNED_STALE_OBSERVATION")
+        self.assertTrue(executor.process({**request, "op_id": "shutdown"})["ok"])
+        executor.close()
+        self.assertIsNone(executor.cache["shutdown"][1]["data"])
+        self.assertEqual(executor.process({**request, "op_id": "shutdown"})["code"], "LEARNED_OBSERVATION_RETIRED")
+
     def test_child_never_captures_after_plan_or_on_non_native_transport(self):
         request = {"schema_version": "fr5.pickup_executor.command.v4", "op_id": "capture-1",
                    "op": "capture_observation", "payload": {"camera_topics": {"camera1": "/up", "camera2": "/wrist"},

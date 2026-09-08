@@ -303,10 +303,12 @@ class PickupExecutor:
             else LIVE_MODE if execution_enabled else MODE
         )
         self.cache = {}
+        self._cached_observation = None
         self.runs = {}
         self._phase_event_writer = None
 
     def close(self):
+        self._retire_observation_cache()
         if self._phase_event_writer is None:
             return True
         ok = self._phase_event_writer.close()
@@ -364,6 +366,16 @@ class PickupExecutor:
         finally:
             self._processing.release()
 
+    def _retire_observation_cache(self, code="LEARNED_OBSERVATION_RETIRED"):
+        if self._cached_observation is None:
+            return
+        op_id, _ = self._cached_observation
+        digest, response = self.cache[op_id]
+        # Keep idempotency/conflict identity, never cache raw RGB for the task's
+        # history or silently recapture when an old operation is retried.
+        self.cache[op_id] = (digest, {**response, "ok": False, "code": code, "data": None})
+        self._cached_observation = None
+
     def _process(self, request):
         try:
             request = _exact(request, COMMAND_FIELDS, "COMMAND_SCHEMA")
@@ -379,13 +391,27 @@ class PickupExecutor:
         except ContractError as exc:
             return _response(code=exc.code, mode=self.mode)
 
+        # Idempotent retries still give the existing lease/stop owner a tick.
+        self.tick()
         previous = self.cache.get(op_id)
         if previous is not None:
             if previous[0] == request_digest:
-                return copy.deepcopy(previous[1])
+                if self._cached_observation is not None and self._cached_observation[0] == op_id:
+                    from tools.data_factory.rollout.finite_plan import check_freshness
+                    age = request["payload"]["max_observation_age_s"]
+                    try:
+                        if not 0 <= self.monotonic_clock() - self._cached_observation[1] <= age:
+                            raise ContractError("LEARNED_STALE_OBSERVATION")
+                        check_freshness({"source_timestamps_s": previous[1]["data"]["observation"]["source_timestamps_s"],
+                                         "max_observation_age_s": age}, self.source_clock())
+                    except ContractError as exc:
+                        self._retire_observation_cache(exc.code)
+                return copy.deepcopy(self.cache[op_id][1])
             return _response(op_id=op_id, op=op, code="OP_ID_CONFLICT", mode=self.mode)
 
-        self.tick()
+        # A distinct request ends the previous capture's retry window. Only its
+        # small command receipt survives; the actual caller owns the RGB input.
+        self._retire_observation_cache()
         try:
             result = getattr(self, f"_{op}")(request["payload"])
         except ContractError as exc:
@@ -394,6 +420,8 @@ class PickupExecutor:
         result["op_id"], result["op"] = op_id, op
         snapshot = copy.deepcopy(result)
         self.cache[op_id] = (request_digest, snapshot)
+        if op == "capture_observation" and snapshot["ok"]:
+            self._cached_observation = (op_id, self.monotonic_clock())
         return copy.deepcopy(snapshot)
 
     def _capture_observation(self, payload):
@@ -1167,6 +1195,7 @@ class PickupExecutor:
         return run["state"]
 
     def _fault(self, run, code):
+        self._retire_observation_cache()
         if "cancel_event" in run:
             run["cancel_event"].set()
         if run["state"] == "BLOCKED":

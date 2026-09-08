@@ -111,6 +111,7 @@ direnv exec . python3 -m unittest tests.data_factory.rollout.test_policy_observa
 
 - [x] Distinguish new finite chunk completion from task review in the native executor and normal caller; retain one recording transaction and lease until explicit terminal review/abort, preserving previously frozen programs.
 - [x] Consume a run/plan/lease-bound fresh observation at that boundary through OneJob and the native serializers; reject active ownership, stale/late/cancelled observations and unchanged plan replay without new sends.
+- [x] Bound native capture-image cache lifetime and keep image bodies out of canonical execution evidence; preserve operation conflicts, reject stale/retired replay and retain lease enforcement on retries.
 - [ ] Retain every subsequent chunk plan and approval through canonical execution evidence before implementing same-task replacement planning/execution; the boundary/read increment alone does not implement closed-loop continuation.
 
 - [ ] Resolve the whole-task continuation/terminal distinction with the existing OneJob and authority owners; retain exact-plan limits until any future-output authority is explicitly established.

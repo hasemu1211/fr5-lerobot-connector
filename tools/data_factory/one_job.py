@@ -444,8 +444,12 @@ class OneJob:
                 if self.plan_envelope and "learned_proposal" in self.plan_envelope["plan"]:
                     from tools.data_factory.rollout.finite_plan import validate_execution_trace
                     validate_execution_trace(self.plan_envelope["plan"], response["data"].get("learned_execution"))
-                self.execution_evidence = copy.deepcopy(response["data"])
-                self.execution_response = copy.deepcopy(response)
+                # RGB belongs to this observation caller, not canonical execution
+                # evidence or a later per-chunk plan/approval history.
+                data = ({key: value for key, value in response["data"].items() if key != "observation"}
+                        if op == "capture_observation" else response["data"])
+                self.execution_evidence = copy.deepcopy(data)
+                self.execution_response = copy.deepcopy({**response, "data": data})
         if not response["ok"] and not allowed_failure:
             raise ContractError(response.get("reason_code" if target == "recorder" else "code") or "%s_RESPONSE" % target.upper())
         return response

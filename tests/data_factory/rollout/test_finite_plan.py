@@ -1360,6 +1360,13 @@ class FinitePlanTest(unittest.TestCase):
             with mock.patch("tools.data_factory.motion.moveit_transport.time.time", return_value=10.):
                 return native.capture_policy_observation(topics, age)
         transport.capture_policy_observation = capture
+        original_poll = job.poll
+        def poll():
+            if ("executor", "capture_observation") in calls:
+                self.assertNotIn("observation", job.execution_evidence)
+                self.assertNotIn("observation", job.execution_response["data"])
+            return original_poll()
+        job.poll = poll
         result = job.observe_learned_boundary({"camera1": "/up", "camera2": "/wrist"})
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["observation"]["observation.state"], ACTION)
@@ -1380,6 +1387,21 @@ class FinitePlanTest(unittest.TestCase):
         self.assertEqual(calls.count(("recorder", "freeze")), 1)
         self.assertEqual(job.poll()["code"], "PRECOMMIT_SAFETY")
         self.assertNotIn(("recorder", "commit"), calls)
+
+    def test_retried_command_cannot_bypass_existing_lease_tick(self):
+        job, executor, transport, _, _, now, calls = self.start_job()
+        request = {"schema_version": "fr5.pickup_executor.command.v4", "op_id": "same-confirm",
+                   "op": "confirm", "payload": {"run_id": "run", "plan_digest": job.plan_digest,
+                   "confirmed_by": "operator", "source": "HUMAN"}}
+        # Repeated operation keeps its receipt but must not prevent the sole
+        # owner from enforcing the elapsed lease.
+        response = executor.process(request)
+        self.assertTrue(response["ok"], response)
+        now[0] += 100.
+        self.assertEqual(executor.process(request), response)
+        self.assertEqual(executor.runs["run"]["failure_code"], "HEARTBEAT_TIMEOUT")
+        self.assertEqual(transport.cancel_count, 1)
+        self.assertEqual(len(transport.sent), 1)
 
     def test_chunk_observation_rejects_binding_active_stale_cancel_and_expired_lease(self):
         for failure in ("wrong_plan", "wrong_lease", "active", "stale", "cancel", "expired", "boundary_timeout", "loosened_age"):

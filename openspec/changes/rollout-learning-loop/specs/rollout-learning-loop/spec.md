@@ -664,7 +664,18 @@ post-action boundary. Successful controller/terminal checks SHALL enter that
 nonterminal state under the existing executor and lease; OneJob SHALL keep its
 same recorder transaction recording until an explicit terminal review or abort.
 Chunk completion SHALL NOT set a task verdict, release the cell, commit an
-episode, or authorize replay or another policy output. Previously frozen programs
+episode, or authorize replay or another policy output.
+The existing command cache SHALL retain at most one observation image body,
+only within that capture's retry window. A distinct request, fault or close
+SHALL retire that body while retaining its operation identity; retrying a retired
+operation SHALL fail without recapture, and conflicting content SHALL retain the
+existing operation-conflict rejection. A still-cached retry SHALL satisfy both
+original source age and independent monotonic elapsed age, and command retries
+SHALL NOT bypass existing executor lease/deadline checks. OneJob SHALL return
+images to the observation caller while excluding them from canonical execution
+response/evidence and subsequent plan/approval history; the caller owns their
+bounded processing lifetime.
+ Previously frozen programs
 with `SEMANTIC_VERDICT` SHALL remain valid with their original boundary behavior;
 validation SHALL NOT rewrite their approved programs.
 
