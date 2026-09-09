@@ -410,7 +410,7 @@ diff --git a/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp b/fairin
    for (size_t i = 0; i < info_.joints.size(); ++i) {
      command_interfaces.emplace_back(hardware_interface::CommandInterface(
          info_.joints[i].name, hardware_interface::HW_IF_POSITION, &_jnt_position_command[i]));
-@@ -101,118 +239,909 @@
+@@ -101,118 +239,924 @@
  }
  
  
@@ -808,7 +808,9 @@ diff --git a/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp b/fairin
 +        if (!current_gripper_fresh(certificate, s1, m1, age)) return false;
 +        _gripper_current_sample = certificate; _gripper_current_state = sample_state;
 +        return true;
-+    } catch (const std::exception &) {
++    } catch (const std::exception &exc) {
++        RCLCPP_ERROR(rclcpp::get_logger("FairinoHardwareInterface"),
++            "GRIPPER_CLOCK_QUERY_FAILED: %s", exc.what());
 +        std::lock_guard<std::mutex> lock(_gripper_mutex);
 +        _gripper_error = -5; _arm_stream_paused = true;
 +        return false;
@@ -857,7 +859,12 @@ diff --git a/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp b/fairin
 +        if (same) {
 +            std::array<double,7> stamp{raw[12],raw[13],raw[14],raw[15],raw[16],raw[17],raw[18]};
 +            std::array<double,7> old{c[12],c[13],c[14],c[15],c[16],c[17],c[18]};
-+            if (stamp < old) { _gripper_error = -5; same = false; }
++            if (stamp < old) {
++                RCLCPP_ERROR(rclcpp::get_logger("FairinoHardwareInterface"),
++                    "GRIPPER_SOURCE_REGRESSED raw=%.6f certified=%.6f raw_received=%.6f certified_received=%.6f",
++                    GripperSourceClock::calendar(stamp), GripperSourceClock::calendar(old), raw[10], c[10]);
++                _gripper_error = -5; same = false;
++            }
 +        }
 +        if (same) {
 +            std::copy(c.begin(), c.end(), _gripper_evidence_values.begin());
@@ -903,6 +910,10 @@ diff --git a/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp b/fairin
 +    if (_is_gripper) {
 +        sample_gripper_evidence();
 +        if (_gripper_error.load() != 0) {
++            RCLCPP_ERROR(rclcpp::get_logger("FairinoHardwareInterface"),
++                "GRIPPER_EVIDENCE_READ_FAILED error=%d generation=%llu valid=%.0f current_valid=%.0f",
++                _gripper_error.load(), static_cast<unsigned long long>(_gripper_command_generation.load()),
++                _gripper_evidence_values[27], _gripper_evidence_values[35]);
 +            return hardware_interface::return_type::ERROR;
 +        }
 +        _jnt_position_state[_gripper_joint_index] =
@@ -962,6 +973,10 @@ diff --git a/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp b/fairin
 +        const double steady = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 +        if (_gripper_evidence_values[35] != 1. || _gripper_evidence_values[27] != 1.) return hardware_interface::return_type::OK;
 +        if (!current_gripper_fresh(_gripper_evidence_values, system, steady, _gripper_evidence_values[42])) {
++            RCLCPP_ERROR(rclcpp::get_logger("FairinoHardwareInterface"),
++                "GRIPPER_INITIAL_CERTIFICATE_STALE system_age=%.6f steady_age=%.6f bound=%.6f",
++                system - _gripper_evidence_values[38], steady - _gripper_evidence_values[39],
++                _gripper_evidence_values[42]);
 +            _gripper_error = -5; _arm_stream_paused = true; return hardware_interface::return_type::ERROR;
 +        }
 +    }
@@ -1544,7 +1559,7 @@ diff --git a/fairino_hardware_v3_9_7/include/fairino_hardware/precise_controller
 new file mode 100644
 --- /dev/null
 +++ b/fairino_hardware_v3_9_7/include/fairino_hardware/precise_controller_clock.hpp
-@@ -0,0 +1,76 @@
+@@ -0,0 +1,82 @@
 +#ifndef FR5_PRECISE_CONTROLLER_CLOCK_HPP
 +#define FR5_PRECISE_CONTROLLER_CLOCK_HPP
 +#include <curl/curl.h>
@@ -1615,7 +1630,13 @@ new file mode 100644
 +    curl_easy_setopt(client_,CURLOPT_XFERINFODATA,this);
 +    const auto result=curl_easy_perform(client_);
 +    long status=0; curl_easy_getinfo(client_,CURLINFO_RESPONSE_CODE,&status);
-+    if(result!=CURLE_OK || status!=200 || cancelled_()) throw std::runtime_error("clock query");
++    const bool aborted=cancelled_();
++    if(result!=CURLE_OK || status!=200 || aborted) {
++      double elapsed=0.; curl_easy_getinfo(client_,CURLINFO_TOTAL_TIME,&elapsed);
++      throw std::runtime_error("clock query: curl="+std::to_string(int(result))+
++        " http="+std::to_string(status)+" cancelled="+std::to_string(aborted)+
++        " elapsed_s="+std::to_string(elapsed)+" timeout_ms="+std::to_string(timeout_ms));
++    }
 +    return parse(body_);
 +  }
 +};

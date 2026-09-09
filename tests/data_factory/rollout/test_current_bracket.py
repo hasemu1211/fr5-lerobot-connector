@@ -213,6 +213,44 @@ class CurrentBracketTest(unittest.TestCase):
                 check_hardware(candidate, evidence["captured_at_s"], evidence["captured_monotonic_s"], .08)
 
 class PreciseReaderTest(unittest.TestCase):
+    def test_query_failure_retains_transport_cause_without_network_or_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "precise_controller_clock.hpp").write_text(patched_source(
+                "fairino_hardware_v3_9_7/include/fairino_hardware/precise_controller_clock.hpp"))
+            (root / "failure.cpp").write_text(r'''
+#include "precise_controller_clock.hpp"
+#include <cassert>
+#include <cstdarg>
+int calls=0;
+extern "C" CURLcode __wrap_curl_easy_perform(CURL*) {
+  ++calls; return CURLE_OPERATION_TIMEDOUT;
+}
+extern "C" CURLcode __wrap_curl_easy_getinfo(CURL*, CURLINFO info, ...) {
+  va_list args; va_start(args, info);
+  if(info==CURLINFO_RESPONSE_CODE) *va_arg(args,long*)=0;
+  else if(info==CURLINFO_TOTAL_TIME) *va_arg(args,double*)=.025175;
+  else {va_end(args);return CURLE_UNKNOWN_OPTION;}
+  va_end(args); return CURLE_OK;
+}
+int main() {
+  fairino_hardware::PreciseControllerClock client("127.0.0.1");
+  try {client.read(25,[]{return false;});assert(false);}
+  catch(const std::runtime_error &e) {
+    assert(std::string(e.what())=="clock query: curl=28 http=0 cancelled=0 elapsed_s=0.025175 timeout_ms=25");
+  }
+  assert(calls==1);
+  try {client.read(25,[]{return true;});assert(false);}
+  catch(const std::runtime_error &e) {assert(std::string(e.what())=="clock cancelled");}
+  assert(calls==1);
+}
+''')
+            binary = root / "failure"
+            subprocess.run(["g++", "-std=c++17", str(root / "failure.cpp"),
+                            "-Wl,--wrap=curl_easy_perform", "-Wl,--wrap=curl_easy_getinfo",
+                            "-lcurl", "-ltinyxml2", "-o", str(binary)], check=True, capture_output=True)
+            subprocess.run([str(binary)], check=True, timeout=2)
+
     def test_actual_parser_keeps_epoch_precision_and_cancellation_has_no_query(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
