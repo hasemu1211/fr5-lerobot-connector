@@ -57,9 +57,9 @@ class CurrentBracketTest(unittest.TestCase):
         return json.loads(result.stdout), policy
 
     def test_native_acquisition_latency_characterization_without_commands(self):
-        # Characterize the current quarter-budget policy before selecting a fix.
+        # Spend one original age budget, not independent per-query fractions.
         # 37 ms approximates an observed RPC tail, not a qualified latency bound.
-        for delay, accepted in ((2, True), (37, False), (120, False)):
+        for delay, accepted in ((2, True), (37, True), (60, False), (120, False)):
             with self.subTest(query_delay_ms=delay):
                 packet, policy = self.packet("query_budget", query_delay_ms=delay, max_age_s=.1)
                 self.assertEqual(packet, {"accepted": accepted, "error": 0 if accepted else -5,
@@ -70,6 +70,23 @@ class CurrentBracketTest(unittest.TestCase):
         packet, _ = self.packet("renewal_schedule")
         self.assertEqual(packet, {"first_ready": True, "old_valid_during_renewal": False,
                                   "old_valid_at_next_ready": False})
+
+    def test_native_continuous_renewal_accepts_interspersed_rpc_tail(self):
+        packet, policy = self.packet("renewal_tail", max_age_s=.1)
+        self.assertEqual(packet["error"], 0, packet)
+        self.assertEqual(packet["moves"], 0, packet)
+        self.assertGreater(packet["queries"], 10, packet)
+        self.assertGreater(packet["arm_sends"], 10, packet)
+        self.assertEqual(policy["max_age_s"], .1)
+
+    def test_native_continuous_renewal_stops_sends_on_actual_expiry(self):
+        for mode in ("renewal_expired", "renewal_sustained"):
+            with self.subTest(mode=mode):
+                packet, _ = self.packet(mode, max_age_s=.1)
+                self.assertNotEqual(packet["error"], 0, packet)
+                self.assertGreater(packet["arm_sends"], 0, packet)
+                self.assertEqual(packet["moves"], 0, packet)
+                self.assertEqual(packet["sends_after_fault"], 0, packet)
 
     def evidence(self, packet, binding):
         from control_msgs.msg import DynamicJointState, InterfaceValue

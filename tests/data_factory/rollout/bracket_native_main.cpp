@@ -55,6 +55,30 @@ int main(int argc, char **argv) {
       <<",\"old_valid_at_next_ready\":"<<(next?"true":"false")<<"}\n";
     return 0;
   }
+  if(mode=="renewal_tail" || mode=="renewal_expired" || mode=="renewal_sustained") {
+    // Exercise the actual producer, sampler and write owner, not just a
+    // certificate predicate. ServoJ here is a CPU mock with a send counter.
+    h._precise_clock->delays_ms=mode=="renewal_tail"
+      ? std::vector<int>{2,2,37} : mode=="renewal_sustained"
+      ? std::vector<int>{2,2,37,37,37,37} : std::vector<int>{2,2,120};
+    h._gripper_thread=std::thread([&]{h.gripper_worker();});
+    const auto until=std::chrono::steady_clock::now()+std::chrono::milliseconds(700);
+    while(std::chrono::steady_clock::now()<until && !h._gripper_error) {
+      h.sample_gripper_evidence();h.write({},{});
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const int error=h._gripper_error.load(), sends=r.arm_sends;
+    if(error) for(int i=0;i<10;++i) {
+      h.sample_gripper_evidence();h.write({},{});
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const int after_fault=r.arm_sends-sends;
+    h.stop_gripper_worker();
+    std::cout<<"{\"error\":"<<error<<",\"moves\":"<<r.moves
+      <<",\"arm_sends\":"<<sends<<",\"sends_after_fault\":"<<after_fault
+      <<",\"queries\":"<<h._precise_clock->queries<<"}\n";
+    return 0;
+  }
   if(mode=="command_99") {r.terminal_scenario=4;h._last_gripper_command=.015;h._jnt_position_command[6]=.015;}
   h._gripper_thread=std::thread([&]{h.gripper_worker();});
   auto pump=[&](int milliseconds) {

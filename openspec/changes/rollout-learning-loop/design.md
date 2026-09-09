@@ -61,11 +61,11 @@ stage. Its exception path sets `_gripper_error=-5`; `read()` then returns hardwa
 ERROR. The query already runs outside the main read/write thread, so merely
 adding another asynchronous wrapper would not remove this error coupling.
 
-The CPU acquisition characterization reproduces rejection of a 37 ms query under
-the selected 100 ms policy, while a 2 ms query succeeds without command sends.
+The baseline CPU acquisition characterization at `b9931d6` reproduces rejection
+of a 37 ms query under the selected 100 ms policy, while a 2 ms query succeeds without command sends.
 This approximates an observed 36.838 ms response tail; it is not a measured
 worst-case controller bound. The test intentionally characterizes the current
-cutoff and must change when a verified correction replaces that behavior.
+cutoff; the candidate regression now requires the same bounded acquisition to succeed.
 
 A deterministic native-predicate counterexample is stronger than first-query
 success: a hypothetical 74 ms acquisition is valid on publication, but its
@@ -86,6 +86,25 @@ This matches the purpose, not an automatic adoption, of ros2_control's
 [asynchronous hardware](https://control.ros.org/jazzy/doc/ros2_control/hardware_interface/doc/asynchronous_components.html).
 Its [read/write error handling](https://control.ros.org/jazzy/doc/ros2_control/hardware_interface/doc/handling_errors_during_read_write.html)
 also makes hardware ERROR a lifecycle event, not an ordinary retry status.
+
+## Candidate selected by native continuous replay
+
+The first budget-only candidate still failed the repeating 2/2/37 ms CPU query
+schedule: the worker added its fixed post-query sleep even when acquisition had
+already consumed the reuse horizon. The revised candidate derives the next wait
+from the original certificate start and existing reuse horizon, rather than
+starting a new sleep budget at publication. RPCs and the frame wait share the
+original whole acquisition budget. The age/tolerance, original anchors and
+read/write expiry checks are unchanged; no query exception is hidden or downgraded.
+
+This repairs scheduling in the existing asynchronous owner rather than adding a
+second sampler, fault/recovery state machine or generic execution layer. Tests
+exercise native producer/sampler/write together, accept interspersed tails, and
+require zero later sends for sustained delays that exhaust evidence validity.
+Mock servo counters are not physical execution evidence. Independent review,
+full regression and physical renewal qualification remain required before
+runtime promotion; the candidate does not prove that 100 ms is a physical
+stopping-distance guarantee or tolerate arbitrary communication delays.
 
 ## Required verification before runtime promotion
 

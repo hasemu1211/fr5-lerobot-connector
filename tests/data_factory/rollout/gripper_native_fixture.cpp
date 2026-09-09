@@ -79,9 +79,13 @@ struct Parameter {std::vector<double> values;std::vector<double> as_double_array
 struct Node {Parameter parameter;Parameter get_parameter(const char *)const{return parameter;}};
 struct PreciseControllerClock {
   std::atomic<int> delay_ms{0};
+  std::vector<int> delays_ms; // Set before the worker starts; never mutated live.
+  std::atomic<size_t> queries{0};
   double read(long timeout, const std::function<bool()> &cancel) {
+    const auto index=queries.fetch_add(1);
+    const int delay=delays_ms.empty() ? delay_ms.load() : delays_ms[index%delays_ms.size()];
     auto start=std::chrono::steady_clock::now();
-    while(std::chrono::steady_clock::now()-start<std::chrono::milliseconds(delay_ms)) {
+    while(std::chrono::steady_clock::now()-start<std::chrono::milliseconds(delay)) {
       if(cancel()) throw std::runtime_error("cancelled");
       if(std::chrono::steady_clock::now()-start>=std::chrono::milliseconds(timeout)) throw std::runtime_error("timeout");
       std::this_thread::sleep_for(std::chrono::milliseconds(1));

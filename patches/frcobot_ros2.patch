@@ -410,7 +410,7 @@ diff --git a/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp b/fairin
    for (size_t i = 0; i < info_.joints.size(); ++i) {
      command_interfaces.emplace_back(hardware_interface::CommandInterface(
          info_.joints[i].name, hardware_interface::HW_IF_POSITION, &_jnt_position_command[i]));
-@@ -101,118 +239,924 @@
+@@ -101,118 +239,938 @@
  }
  
  
@@ -763,9 +763,17 @@ diff --git a/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp b/fairin
 +    }
 +    const double s0 = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
 +    const double m0 = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
-+    const auto timeout_ms = long(std::max(1., std::min(300., age * 250.)));
++    // Queries and frame wait spend one original acquisition budget. The
++    // independent read/write owner still rejects an expired certificate while
++    // renewal is in flight; this does not extend any existing evidence lease.
++    const auto timeout_ms = [&] {
++        const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
++        const double remaining = (age - (now - m0)) * 1000.;
++        if (remaining < 1.) throw std::runtime_error("clock acquisition budget expired");
++        return long(std::min(300., remaining));
++    };
 +    try {
-+        const double q0 = _precise_clock->read(timeout_ms, cancelled);
++        const double q0 = _precise_clock->read(timeout_ms(), cancelled);
 +        if (q0 < _last_controller_clock) throw std::runtime_error("controller clock regressed");
 +        std::array<double,35> sample{};
 +        ROBOT_STATE_PKG sample_state{};
@@ -774,13 +782,13 @@ diff --git a/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp b/fairin
 +            if (_stop_gripper_thread || _gripper_error.load() || udp_command_error.load()) return false;
 +            sample = _gripper_raw_sample; sample_state = _gripper_raw_state;
 +            const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
-+            if (now - m0 >= age / 2.) return false;
++            if (now - m0 >= age) return false;
 +            std::array<double,7> stamp{sample[12],sample[13],sample[14],sample[15],sample[16],sample[17],sample[18]};
 +            // One millisecond on either side excludes ambiguous calendar quantization ties.
 +            if (sample[27] == 1. && sample[5]==double(_gripper_command_generation.load()) && GripperSourceClock::calendar(stamp) - .001 > q0 && sample[10] >= m0) break;
 +            _gripper_cv.wait_for(lock, std::chrono::milliseconds(1));
 +        }
-+        const double q1 = _precise_clock->read(timeout_ms, cancelled);
++        const double q1 = _precise_clock->read(timeout_ms(), cancelled);
 +        const double m1 = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 +        const double s1 = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
 +        if (q1 <= q0) throw std::runtime_error("controller clock regressed");
@@ -1098,9 +1106,15 @@ diff --git a/fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp b/fairin
 +        uint64_t command_generation = 0;
 +        {
 +            std::unique_lock<std::mutex> lock(_gripper_mutex);
-+            if (_require_gripper_source_clock)
-+                _gripper_cv.wait_for(lock, std::chrono::duration<double>(std::max(.001, _gripper_current_sample[42]/8.)),
++            if (_require_gripper_source_clock) {
++                // The reuse horizon is measured from acquisition start, not
++                // from RPC completion. A slow acquisition must not add another
++                // fixed sleep before renewing its already-aging certificate.
++                const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
++                const double wait = _gripper_current_sample[42]/4. - (now - _gripper_current_sample[39]);
++                _gripper_cv.wait_for(lock, std::chrono::duration<double>(std::max(.001, wait)),
 +                    [this] { return _stop_gripper_thread || _pending_gripper_position.has_value(); });
++            }
 +            else _gripper_cv.wait(lock, [this] { return _stop_gripper_thread || _pending_gripper_position.has_value(); });
 +            if (_stop_gripper_thread) return;
 +            position = _pending_gripper_position;
