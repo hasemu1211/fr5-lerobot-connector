@@ -123,6 +123,36 @@ stopping-distance guarantee or tolerate arbitrary communication delays.
 
 ## Required verification before runtime promotion
 
+### Attribute the query path before changing its temporal contract
+
+The installed manufacturer `libfairino.so.2.3.7` remains byte-identical to the
+pinned vendor commit. FR5 changes the ROS adapter, including a separate libcurl
+`GetSystemClock` client; it has not patched this SDK binary. Repeated query
+certification and propagation of its expiry into hardware ERROR are FR5-owned
+integration decisions, not evidence that the vendor SDK is defective.
+
+Installed SDK inspection and a read-only native call establish that existing
+`GetRobotRealTimeState` consumes a CNDE cache from TCP 20005. Its configuration
+readback returns an 8 ms period and fields 3–75, including `RobotTime` and gripper
+feedback. `GetRobotRealtimeStateSamplePeriod` instead names TCP 20004 in the
+pinned header; a same-name XMLRPC fault cannot disprove a local SDK operation.
+Reuse the installed interface before proposing another CNDE connection, changing
+its field set/period or adopting a newer SDK. Configured period is not a measured
+delivery bound or a new freshness/completion authority. The manufacturer's
+[CNDE interface](https://fairino-doc-en.readthedocs.io/latest/RobotCommunication/cnde_introduction.html)
+describes streaming feedback, but latest documentation is not installed-firmware
+qualification.
+
+Wire and client measurements during bounded current-position hold agree on a
+48.6 ms clock-response delay while UDP servo requests continue at roughly 10 ms
+intervals with replies. This rules against a comparable userspace scheduling
+delay in that sample, not every host/network cause. A later read-only SDK-close
+comparison also produced timeouts; controller servo load is not established as
+the sole cause. See the handoff's exact artifacts. Do not substitute another RPC
+method into q0/frame/q1 proof slots, treat tracing overhead as production timing,
+or weaken the lease on these observations. Any correction must account for
+current stream age, same-command completion and shutdown effects separately.
+
 Exercise initial acquisition, repeated renewal, isolated and sustained delay,
 true expiry, cancellation, source regression and generation changes with the
 native producer and read/write consumer. Preserve original HOST anchors, exact

@@ -15,17 +15,42 @@ constraints, not bypassing existing execution authority. Full regression complet
 PID 4129485 has exited and session 79732 returned its terminal result. Do not rerun
 this suite solely because the old handoff below describes it as running.
 
-Candidate physical continuity **failed**, despite the CPU PASS. At 13:05:45 KST
-the exact candidate emitted `GRIPPER_INITIAL_CERTIFICATE_STALE`, original system
-and steady age 0.100725s against selected 0.100000s. It then cancelled an in-flight
-clock query (`curl=42`, cancelled=1, elapsed 0.085370s, timeout 99ms). Hardware
-ERROR deactivated the controllers; the Python `ROS_JOINT_STATE_STALE` was a
-downstream symptom, not the first cause. This does not establish the server's
-eventual reply time or prove a particular network cause.
+Candidate physical continuity **failed**, despite the CPU PASS. The latest
+13:26:57 KST launch added passive packet capture to the same bounded hold;
+it did not change the candidate or selected 100 ms/1 ms temporal policy.
+Request/reply wire timestamps `1788928022.124189` / `.172747` give 48.558 ms;
+libcurl measured 48.625 ms to first byte. UDP 20007 requests continued at about
+10 ms intervals with replies during this wait. The original certificate then
+expired at `.200083`, before the next reply at `.203951`. Hardware ERROR
+deactivated controllers; Python `ROS_JOINT_STATE_STALE` was downstream. This
+supports response-path latency, not a proven firmware lock, network defect or
+general ROS stall.
 
-Canonical log:
-`/home/codelab/.ros/log/2026-09-09-13-05-39-202690-codelab-System-Product-Name-5474/launch.log`.
-The bounded stack ended; PIDs 5676/5677/5678 were confirmed gone. No learned or
+Exact evidence:
+
+- `/tmp/fr5-clock-attribution-XBphaW/runtime.pcap`, SHA-256
+  `8d6294ef7124f9a11db2033baf87cbb0a77a6df2cb93ea60b97bdf683a8e7b16`;
+  64 packets, no capture drops, bounded prefixes (128-byte snap length).
+- `/home/codelab/.ros/log/2026-09-09-13-26-57-494466-codelab-System-Product-Name-20582/launch.log`,
+  SHA-256 `a626a2102bb8de4742a5d8d64c3cb1095caf6745a5701b44bce14051b68a0764`.
+- Orca `msg_a5d5e663737b`: independent source/binary audit of the same cutoff.
+- `/tmp/fr5-clock-attribution-XBphaW/sdk-readonly-config.log`: actual SDK CNDE
+  readback, period 8 ms, fields 3–75. Before/during cached reads: 64/64 each,
+  maximum 2.06/2.57 ms. After CloseRPC: 30 PASS / 34 timeout at a diagnostic
+  25 ms query limit, exit 1; do not hide this counterexample or attribute it to
+  ServoJ, which was not called. SDK state reads had no errors. Root cause of
+  the post-close result remains unestablished.
+- `/tmp/fr5-clock-attribution-XBphaW/clock-only-100ms.log`: subsequent separate
+  process without SDK/ROS, 96/96 replies, mean 1.61 ms, maximum 2.28 ms,
+  including three server-directed connection renewals. The diagnostic 100 ms
+  wait did not alter the production policy. The native probe prints failures
+  without a failing exit code; the 96/96 claim is from its records, not exit 0.
+- `sdk-strace.*` in the same temporary directory confirms installed TCP 20005
+  receive and server `Connection: close` after batches; tracing adds host
+  overhead and its timeouts are not production latency evidence.
+
+The bounded stack ended; latest PIDs 20810/20811 and earlier trial PIDs were
+confirmed gone, with no remaining controller TCP connection. No learned or
 gripper goal was submitted. Native activation/current-position hold did occur.
 Do not promote this candidate as physically qualified or repeat it unchanged
 without a new discriminating observation.
