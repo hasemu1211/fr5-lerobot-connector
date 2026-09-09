@@ -156,6 +156,19 @@ OpenSpec은 지속 가능한 외부 행동 intent, 안정된 경계와 outcome �
 - **AND** push 실패나 원격 진전은 Orca에 정확한 commit·검증 범위·미반영 사유를 남겨 해결하며, 독립적인 적격 작업을 멈추지 않는다
 - **AND** source 공개는 실행 중인 프로세스·드라이버의 배포, 실물 검증 또는 데이터·학습 승인을 뜻하지 않는다
 
+### Requirement: Existing product interfaces precede custom capabilities
+각 lane은 성숙한 상용·오픈소스 제품이 제공하는 범용 기능을 경쟁적으로 재구현하기보다 지원되는 인터페이스로 재사용하는 경로를 우선 검토해야 한다(SHALL). 도입·교체·확장 전에 실제 소비자가 필요한 입출력·단위와 시간 의미·lifecycle owner·오류 및 evidence 전달 계약을 기존 책임 경계에 맞춰 필요한 수준으로 먼저 정리해야 한다(SHALL). 자체 구현은 해당 인터페이스가 충족하지 못하는 FR5 고유 요구와 검증된 공백에 한정하며(SHALL), 기존 안전·승인·원본 보존 책임을 외부 제품 사용으로 생략하거나 별도 정본과 owner로 복제해서는 안 된다(MUST NOT).
+
+#### Scenario: An existing product can satisfy a required capability
+- **WHEN** 현재 제품 목표에 필요한 기능을 외부 제품의 지원 인터페이스로 소비할 수 있다
+- **THEN** 실제 설치 버전·source/tests와 필요한 공식 근거를 대조해 계약의 적합성을 확인하고, 기존 owner를 보존하는 최소 연결로 소비한다
+- **AND** 재사용 여부는 실제 소비 경로와 유지보수·운용 비용으로 판단하며, 연결 선언만으로 실행·검증 완료를 주장하지 않는다
+
+#### Scenario: Reuse leaves a specific gap or delays the critical outcome
+- **WHEN** 외부 인터페이스가 필요한 의미·권한·evidence를 보존하지 못하거나 교체 비용이 현재 핵심 결과에 주는 가치보다 크다
+- **THEN** 근거가 있는 FR5 책임만 최소 구현하거나 기존 경로를 유지하고, 도입·보류 이유를 해당 lane의 설계 근거에 남긴다
+- **AND** 이 원칙을 이유로 범용 wrapper·새 서비스·추측성 미래 인터페이스를 만들거나 가장 가까운 collect → train → rollout → diagnose → recollect의 실제 증명을 지연시키지 않는다
+
 ### Requirement: Learning evidence analysis stays separated from authority
 Data Quality Analysis와 Rollout Evidence Analysis는 각자 canonical output을 가져야 한다(SHALL). Recommendation은 두 결과를 읽어 advisory synthesis만 제공해야 하며(MUST), recorder·motion·collection·promotion·training·publication authority를 가져서는 안 된다(MUST NOT).
 
