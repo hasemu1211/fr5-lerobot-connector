@@ -1,0 +1,495 @@
+diff --git a/libfairino/src/include/CNDE/FRCNDEClient.h b/libfairino/src/include/CNDE/FRCNDEClient.h
+index 5839b5e..a31312a 100644
+--- a/libfairino/src/include/CNDE/FRCNDEClient.h
++++ b/libfairino/src/include/CNDE/FRCNDEClient.h
+@@ -1,6 +1,8 @@
+ #pragma once
+ 
+ #include "robot_types.h"
++#include "robot_state_snapshot.h"
++#include <atomic>
+ #include "FRTcpClient.h"
+ #include <mutex>
+ #include <memory>
+@@ -17,6 +19,9 @@ public:
+ 	FRCNDEClient(std::shared_ptr<ROBOT_STATE_PKG> pkg, int* comErr);
+ 	~FRCNDEClient();
+ 
++    // Bounded: never waits for blocking receive or reconnect. BUSY leaves out unchanged.
++    int GetStateSnapshot(RobotStateSnapshot* out);
++
+ 	int Connect(std::string IP, int port);
+ 	int SetReConnectParam(bool enable, int reconnectTime, int period);
+ 	bool GetReConnectEnable();
+@@ -41,12 +46,17 @@ public:
+ private:
+ 	void RecvRobotStateThread();
+ 	void InitAllStates();
++    bool PublishReceivedFrame(const char* data, size_t size, std::int64_t received_ns,
++                              std::uint64_t receive_epoch);
++    void InvalidateSnapshot(bool connection_change, bool configuration_change = false);
++
+ 
+ 
+ 
+ private:
+ 
+-	bool robotStateRunFlag = false;
++	std::atomic<bool> robotStateRunFlag{false};
++    std::atomic<bool> receiverActive{false};
+ 	std::shared_ptr <FRTcpClient> rtClient;
+ 	std::shared_ptr<ROBOT_STATE_PKG> robotStatePkg;
+ 
+@@ -55,6 +65,9 @@ private:
+ 	int* sockComErr = nullptr;
+ 
+ 	std::mutex recvCNDEPkgMutex;
++    std::mutex publicationMutex;
++    RobotStateSnapshot published;
++
+ 
+ 	std::map<RobotState, std::tuple<std::string, int, std::string, std::string>> allStates;  //
+ //           枚举键                 cnde状态名称 结构体索引  结构体中的数据类型  cnde中的数据类型
+diff --git a/libfairino/src/include/Robot-EN/robot.h b/libfairino/src/include/Robot-EN/robot.h
+index 572a2eb..4e455e6 100644
+--- a/libfairino/src/include/Robot-EN/robot.h
++++ b/libfairino/src/include/Robot-EN/robot.h
+@@ -12,6 +12,7 @@
+ #endif // WIN32
+ 
+ #include "robot_types.h"
++#include "robot_state_snapshot.h"
+ #include <iostream>
+ #include <list>
+ #include <vector>
+@@ -2545,6 +2546,8 @@ public:
+       * @return error code
+ 	 */
+ 	errno_t GetRobotRealTimeState(ROBOT_STATE_PKG *pkg);
++    // Additive, nonblocking local snapshot; no RPC, reconnect wait or age claim.
++    errno_t GetRobotRealTimeStateSnapshot(RobotStateSnapshot *snapshot);
+ 	/**
+ 	* @brief Get the robot peripheral protocol
+       * @param [out] protocol Robot peripheral protocol number 4096-Extended axis control card; 4097-ModbusSlave; 4098-ModbusMaster
+diff --git a/libfairino/src/src/CNDE/FRCNDEClient.cpp b/libfairino/src/src/CNDE/FRCNDEClient.cpp
+index 299d200..f2fc29c 100644
+--- a/libfairino/src/src/CNDE/FRCNDEClient.cpp
++++ b/libfairino/src/src/CNDE/FRCNDEClient.cpp
+@@ -33,6 +33,9 @@ FRCNDEClient::~FRCNDEClient()
+ 
+ int FRCNDEClient::Connect(std::string IP, int port)
+ {
++    std::unique_lock<std::mutex> receive_lock(recvCNDEPkgMutex, std::try_to_lock);
++    if (!receive_lock.owns_lock() || receiverActive || robotStateRunFlag) return ROBOT_SNAPSHOT_BUSY;
++    InvalidateSnapshot(true);
+     rtClient->SetIpConfig(IP);
+     rtClient->SetPortConfig(port);
+ 
+@@ -48,15 +51,18 @@ int FRCNDEClient::Connect(std::string IP, int port)
+         rtn = SendCNDEOutputConfig();
+         if (rtn != 0)
+         {
++            robotStateRunFlag = false;
+             return rtn;
+         }
+ 
+         rtn = SetCNDEStart();
+         if (rtn != 0)
+         {
++            robotStateRunFlag = false;
+             return rtn;
+         }
+         
++        receiverActive = true;
+         thread stateThread(&FRCNDEClient::RecvRobotStateThread, this);
+         stateThread.detach();
+         return 0;
+@@ -81,6 +87,7 @@ bool FRCNDEClient::GetReConnState()
+ int FRCNDEClient::Close()
+ {
+     robotStateRunFlag = false;
++    InvalidateSnapshot(true);
+     
+     rtClient->Close();
+ 	return 0;
+@@ -88,53 +95,58 @@ int FRCNDEClient::Close()
+ 
+ 
+ 
+-void FRCNDEClient::RecvRobotStateThread()
++void FRCNDEClient::InvalidateSnapshot(bool connection_change, bool configuration_change)
+ {
+-    char pkgBuf[CNDE_MAX_PKG_SIZE] = {};
+-    CNDE_PKG pkg = {};
+-
+-    while (robotStateRunFlag)
+-    {
+-        std::lock_guard<std::mutex> lock(recvCNDEPkgMutex);
++    std::lock_guard<std::mutex> lock(publicationMutex);
++    published.valid = false;
++    if (connection_change) ++published.connection_epoch;
++    if (configuration_change) ++published.configuration_epoch;
++    // Preserve original receipt and sequence: invalidation is not new evidence.
++}
+ 
+-        int recvLen = rtClient->RecvCNDEPkg(pkgBuf);
+-        //std::cout << "recv pkg time is " << std::chrono::duration_cast<std::chrono::milliseconds>(
+-        //    std::chrono::system_clock::now().time_since_epoch()
+-        //).count() << std::endl;
++int FRCNDEClient::GetStateSnapshot(RobotStateSnapshot* out)
++{
++    if (!out) return ROBOT_SNAPSHOT_INVALID_ARGUMENT;
++    std::unique_lock<std::mutex> lock(publicationMutex, std::try_to_lock);
++    if (!lock.owns_lock()) return ROBOT_SNAPSHOT_BUSY;
++    *out = published;
++    return out->valid ? ROBOT_SNAPSHOT_OK : ROBOT_SNAPSHOT_UNAVAILABLE;
++}
+ 
+-        if (recvLen < 0)
+-        {   
+-            *sockComErr = ERR_SOCKET_COM_FAILED;
+-            return;
+-        }
+-        else if (recvLen == 0)  //发生重连，需要再次发送开始指令帧
+-        {
+-            SendCNDEOutputConfig();
+-            SetCNDEStart();
+-        }
+-        else
+-        {
+-            pkg.Clear();
+-            std::vector<char> frame(pkgBuf, pkgBuf + recvLen);
+-            int rtn = FrameToCNDEPkg(frame, pkg);
+-            //printf("pkg length is %d\n", pkg.len);
+-            memset(pkgBuf, 0, CNDE_MAX_PKG_SIZE);
+-            int statePtrIndex = 0;
+-            switch (pkg.type)
+-            {
+-                case CNDE_FRAME_TYPE_OUTPUT_STATE:
+-                {
+-                    //printf("type CNDE_FRAME_TYPE_OUTPUT_STATE\n");
++bool FRCNDEClient::PublishReceivedFrame(const char* data, size_t size,
++    std::int64_t received_ns, std::uint64_t receive_epoch)
++{
++    // Called only by the existing receiver under recvCNDEPkgMutex. Decode into
++    // private storage; getter never observes field-by-field shared mutation.
++    auto reject = [this] { InvalidateSnapshot(false); return false; };
++    if (!data || size < 8 || size > CNDE_MAX_PKG_SIZE || received_ns <= 0) return reject();
++    CNDE_PKG pkg{};
++    if (FrameToCNDEPkg(std::vector<char>(data, data + size), pkg) != 0) return reject();
++    if (pkg.type != CNDE_FRAME_TYPE_OUTPUT_STATE) return reject();
++    size_t expected = 0;
++    for (auto type : configStates) {
++        auto it = allStates.find(type);
++        if (it == allStates.end()) return reject();
++        const int width = GetConfigTypeSize(get<3>(it->second));
++        if (width <= 0 || size_t(width) > CNDE_MAX_PKG_SIZE - expected) return reject();
++        expected += width;
++    }
++    if (expected != pkg.data.size()) return reject();
++    ROBOT_STATE_PKG staged{};
++    int statePtrIndex = 0;
+                     for (auto type : configStates)
+                     {
++                        bool decoded = false;
+                         if (get<3>(allStates[type]) == get<2>(allStates[type]))//数据类型相同，直接对应
+                         {
+-                            memcpy(reinterpret_cast<char*>(robotStatePkg.get()) + get<1>(allStates[type]), pkg.data.data() + statePtrIndex, GetConfigTypeSize(get<3>(allStates[type])));
++                            memcpy(reinterpret_cast<char*>(&staged) + get<1>(allStates[type]), pkg.data.data() + statePtrIndex, GetConfigTypeSize(get<3>(allStates[type])));
++                            decoded = true;
+                             statePtrIndex += GetConfigTypeSize(get<3>(allStates[type]));
+                         }
+                         else if (GetConfigTypeSize(get<3>(allStates[type])) == GetConfigTypeSize(get<2>(allStates[type])))//数据长度相同，直接对应
+                         {
+-                            memcpy(reinterpret_cast<char*>(robotStatePkg.get()) + get<1>(allStates[type]), pkg.data.data() + statePtrIndex, GetConfigTypeSize(get<3>(allStates[type])));
++                            memcpy(reinterpret_cast<char*>(&staged) + get<1>(allStates[type]), pkg.data.data() + statePtrIndex, GetConfigTypeSize(get<3>(allStates[type])));
++                            decoded = true;
+                             statePtrIndex += GetConfigTypeSize(get<3>(allStates[type]));
+                         }
+                         else if(get<3>(allStates[type]) == "UINT8")
+@@ -145,7 +157,8 @@ void FRCNDEClient::RecvRobotStateThread()
+                                 memcpy(&cndeValue, pkg.data.data() + statePtrIndex, GetConfigTypeSize(get<3>(allStates[type])));
+ 
+                                 int tmpValue = cndeValue;
+-                                memcpy(reinterpret_cast<char*>(robotStatePkg.get()) + get<1>(allStates[type]), &tmpValue, sizeof(int));
++                                memcpy(reinterpret_cast<char*>(&staged) + get<1>(allStates[type]), &tmpValue, sizeof(int));
++                                decoded = true;
+                             }
+                             statePtrIndex += GetConfigTypeSize(get<3>(allStates[type]));
+                         }
+@@ -157,7 +170,8 @@ void FRCNDEClient::RecvRobotStateThread()
+                                 memcpy(&cndeValue, pkg.data.data() + statePtrIndex, GetConfigTypeSize(get<3>(allStates[type])));
+ 
+                                 uint8_t tmpValue = cndeValue;
+-                                memcpy(reinterpret_cast<char*>(robotStatePkg.get()) + get<1>(allStates[type]), &tmpValue, sizeof(uint8_t));
++                                memcpy(reinterpret_cast<char*>(&staged) + get<1>(allStates[type]), &tmpValue, sizeof(uint8_t));
++                                decoded = true;
+                             }
+                             else if (get<2>(allStates[type]) == "UINT16")
+                             {
+@@ -165,7 +179,8 @@ void FRCNDEClient::RecvRobotStateThread()
+                                 memcpy(&cndeValue, pkg.data.data() + statePtrIndex, GetConfigTypeSize(get<3>(allStates[type])));
+ 
+                                 uint16_t tmpValue = cndeValue;
+-                                memcpy(reinterpret_cast<char*>(robotStatePkg.get()) + get<1>(allStates[type]), &tmpValue, sizeof(uint16_t));
++                                memcpy(reinterpret_cast<char*>(&staged) + get<1>(allStates[type]), &tmpValue, sizeof(uint16_t));
++                                decoded = true;
+                             }
+                             else if (get<2>(allStates[type]) == "UINT32")
+                             {
+@@ -173,7 +188,8 @@ void FRCNDEClient::RecvRobotStateThread()
+                                 memcpy(&cndeValue, pkg.data.data() + statePtrIndex, GetConfigTypeSize(get<3>(allStates[type])));
+ 
+                                 uint32_t tmpValue = cndeValue;
+-                                memcpy(reinterpret_cast<char*>(robotStatePkg.get()) + get<1>(allStates[type]), &tmpValue, sizeof(uint32_t));
++                                memcpy(reinterpret_cast<char*>(&staged) + get<1>(allStates[type]), &tmpValue, sizeof(uint32_t));
++                                decoded = true;
+                             }
+                             else if (get<2>(allStates[type]) == "INT8")
+                             {
+@@ -181,8 +197,9 @@ void FRCNDEClient::RecvRobotStateThread()
+                                 memcpy(&cndeValue, pkg.data.data() + statePtrIndex, GetConfigTypeSize(get<3>(allStates[type])));
+ 
+                                 int8_t tmpValue = cndeValue;
+-                                memcpy(reinterpret_cast<char*>(robotStatePkg.get()) + get<1>(allStates[type]), &tmpValue, sizeof(uint32_t));
+-                            }
++                                memcpy(reinterpret_cast<char*>(&staged) + get<1>(allStates[type]), &tmpValue, sizeof(int8_t));
++                                decoded = true;
++                    }
+ 
+                             statePtrIndex += GetConfigTypeSize(get<3>(allStates[type]));
+                         }
+@@ -194,7 +211,8 @@ void FRCNDEClient::RecvRobotStateThread()
+                                 memcpy(&cndeValue, pkg.data.data() + statePtrIndex, GetConfigTypeSize(get<3>(allStates[type])));
+ 
+                                 int tmpValue = cndeValue;
+-                                memcpy(reinterpret_cast<char*>(robotStatePkg.get()) + get<1>(allStates[type]), &tmpValue, sizeof(int));  
++                                memcpy(reinterpret_cast<char*>(&staged) + get<1>(allStates[type]), &tmpValue, sizeof(int));
++                                decoded = true;
+                             }
+                             statePtrIndex += GetConfigTypeSize(get<3>(allStates[type]));
+                         }
+@@ -206,7 +224,8 @@ void FRCNDEClient::RecvRobotStateThread()
+                                 memcpy(&cndeValue, pkg.data.data() + statePtrIndex, GetConfigTypeSize(get<3>(allStates[type])));
+ 
+                                 float tmpValue = static_cast<float>(cndeValue);
+-                                memcpy(reinterpret_cast<char*>(robotStatePkg.get()) + get<1>(allStates[type]), &tmpValue, sizeof(float));
++                                memcpy(reinterpret_cast<char*>(&staged) + get<1>(allStates[type]), &tmpValue, sizeof(float));
++                                decoded = true;
+                             }
+                             else if (get<2>(allStates[type]) == "UINT16") //AI、AO。0-100.0   0-4095
+                             {
+@@ -214,7 +233,8 @@ void FRCNDEClient::RecvRobotStateThread()
+                                 memcpy(&cndeValue, pkg.data.data() + statePtrIndex, GetConfigTypeSize(get<3>(allStates[type])));
+ 
+                                 uint16_t tmpValue = static_cast<uint16_t>(cndeValue);
+-                                memcpy(reinterpret_cast<char*>(robotStatePkg.get()) + get<1>(allStates[type]), &tmpValue, sizeof(uint16_t));  
++                                memcpy(reinterpret_cast<char*>(&staged) + get<1>(allStates[type]), &tmpValue, sizeof(uint16_t));
++                                decoded = true;
+                             }
+                             statePtrIndex += GetConfigTypeSize(get<3>(allStates[type]));
+                         }
+@@ -245,19 +265,21 @@ void FRCNDEClient::RecvRobotStateThread()
+                                     }
+                                 }
+ 
+-                                memcpy(reinterpret_cast<char*>(robotStatePkg.get()) + get<1>(allStates[type]), &tmpValue, GetConfigTypeSize(get<2>(allStates[type])));
++                                memcpy(reinterpret_cast<char*>(&staged) + get<1>(allStates[type]), &tmpValue, GetConfigTypeSize(get<2>(allStates[type])));
++                                decoded = true;
+                             }
+                             else if (get<2>(allStates[type]).find("UINT16,UINT8,UINT8,UINT8,UINT8,UINT8,UINT6") != std::string::npos)  //机器人时间戳，特殊处理一下
+                             {                                      
+                                 int robotTime[7] = { 0 };
+                                 memcpy(robotTime, pkg.data.data() + statePtrIndex, GetConfigTypeSize(get<3>(allStates[type])));
+-                                robotStatePkg->robotTime.year = robotTime[0];
+-                                robotStatePkg->robotTime.mouth = robotTime[1];
+-                                robotStatePkg->robotTime.day = robotTime[2];
+-                                robotStatePkg->robotTime.hour = robotTime[3];
+-                                robotStatePkg->robotTime.minute = robotTime[4];
+-                                robotStatePkg->robotTime.second = robotTime[5];
+-                                robotStatePkg->robotTime.millisecond = robotTime[6];
++                                staged.robotTime.year = robotTime[0];
++                                staged.robotTime.mouth = robotTime[1];
++                                staged.robotTime.day = robotTime[2];
++                                staged.robotTime.hour = robotTime[3];
++                                staged.robotTime.minute = robotTime[4];
++                                staged.robotTime.second = robotTime[5];
++                                staged.robotTime.millisecond = robotTime[6];
++                                decoded = true;
+                             }
+ 
+                             statePtrIndex += GetConfigTypeSize(get<3>(allStates[type]));   
+@@ -272,22 +294,56 @@ void FRCNDEClient::RecvRobotStateThread()
+                                 uint16_t tmpValue[2] = { 0 };
+                                 tmpValue[0] = static_cast<uint16_t>(cndeValue[0]);
+                                 tmpValue[1] = static_cast<uint16_t>(cndeValue[1]);
+-                                memcpy(reinterpret_cast<char*>(robotStatePkg.get()) + get<1>(allStates[type]), &tmpValue, GetConfigTypeSize(get<2>(allStates[type])));
++                                memcpy(reinterpret_cast<char*>(&staged) + get<1>(allStates[type]), &tmpValue, GetConfigTypeSize(get<2>(allStates[type])));
++                                decoded = true;
+                             }
+                             statePtrIndex += GetConfigTypeSize(get<3>(allStates[type]));
+                         }
+                         else
+                         {
+                             statePtrIndex += GetConfigTypeSize(get<3>(allStates[type]));
+-                            logger_error("Robot cnde state type error. %s %s", get<1>(allStates[type]), get<3>(allStates[type]));
++                            return reject();
+                         }
++                        if (!decoded) return reject();
+                     }
+-                    break;
+-                }
+ 
+-                default:
+-                    break;
++    std::lock_guard<std::mutex> lock(publicationMutex);
++    if (!robotStateRunFlag || receive_epoch != published.connection_epoch) return false;
++    published.state = staged;
++    published.host_receive_steady_ns = received_ns;
++    ++published.producer_sequence;
++    published.valid = true;
++    // Legacy cache/API retained. Only the new snapshot API promises coherence.
++    *robotStatePkg = staged;
++    return true;
++}
++
++void FRCNDEClient::RecvRobotStateThread()
++{
++    struct ReceiverExit { std::atomic<bool>& active; ~ReceiverExit() { active = false; } } exit{receiverActive};
++    char pkgBuf[CNDE_MAX_PKG_SIZE] = {};
++    while (robotStateRunFlag) {
++        std::lock_guard<std::mutex> receive_lock(recvCNDEPkgMutex);
++        std::uint64_t epoch;
++        { std::lock_guard<std::mutex> lock(publicationMutex); epoch = published.connection_epoch; }
++        const int recvLen = rtClient->RecvCNDEPkg(pkgBuf);
++        // SDK userspace completion of a FULL frame, not kernel arrival or source time.
++        const auto received_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
++            std::chrono::steady_clock::now().time_since_epoch()).count();
++        if (!robotStateRunFlag) break;
++        if (recvLen < 0) {
++            InvalidateSnapshot(true);
++            *sockComErr = ERR_SOCKET_COM_FAILED;
++            return;
++        }
++        if (recvLen == 0) {
++            InvalidateSnapshot(true);
++            if (SendCNDEOutputConfig() != 0 || SetCNDEStart() != 0) {
++                *sockComErr = ERR_SOCKET_COM_FAILED;
++                return;
+             }
++        } else {
++            PublishReceivedFrame(pkgBuf, recvLen, received_ns, epoch);
+         }
+     }
+     rtClient->Close();
+@@ -525,6 +581,9 @@ int FRCNDEClient::SetCNDEStop()
+ 
+ int FRCNDEClient::SetCNDEStateConfig(vector<RobotState> states, int period)
+ {
++    std::unique_lock<std::mutex> lock(recvCNDEPkgMutex, std::try_to_lock);
++    if (!lock.owns_lock() || robotStateRunFlag) return ROBOT_SNAPSHOT_BUSY;
++
+     if (states.size() == 0)
+     {
+         return ERR_NEED_AT_LEAST_ONE_STATE;
+@@ -543,6 +602,7 @@ int FRCNDEClient::SetCNDEStateConfig(vector<RobotState> states, int period)
+         return ERR_PARAM_VALUE;
+     }
+ 
++    InvalidateSnapshot(false, true);
+     configStates.clear();
+     configStates = states;
+     robotStatePeriod = period;
+@@ -551,6 +611,9 @@ int FRCNDEClient::SetCNDEStateConfig(vector<RobotState> states, int period)
+ 
+ int FRCNDEClient::AddCNDEState(RobotState state)
+ {
++    std::unique_lock<std::mutex> lock(recvCNDEPkgMutex, std::try_to_lock);
++    if (!lock.owns_lock() || robotStateRunFlag) return ROBOT_SNAPSHOT_BUSY;
++
+     if (allStates.find(state) == allStates.end()) 
+     {
+         return ERR_STATE_INVALID;
+@@ -562,12 +625,16 @@ int FRCNDEClient::AddCNDEState(RobotState state)
+         return ERR_STATE_ALREADY_EXISTS;
+     }
+ 
++    InvalidateSnapshot(false, true);
+     configStates.push_back(state);
+     return 0;
+ }
+ 
+ int FRCNDEClient::DeleteCNDEState(RobotState state)
+ {
++    std::unique_lock<std::mutex> lock(recvCNDEPkgMutex, std::try_to_lock);
++    if (!lock.owns_lock() || robotStateRunFlag) return ROBOT_SNAPSHOT_BUSY;
++
+     auto it = std::find(configStates.begin(), configStates.end(), state);
+     if (it == configStates.end())
+     {
+@@ -579,16 +646,21 @@ int FRCNDEClient::DeleteCNDEState(RobotState state)
+         return  ERR_NEED_AT_LEAST_ONE_STATE;
+     }
+ 
++    InvalidateSnapshot(false, true);
+     configStates.erase(std::remove(configStates.begin(), configStates.end(), state), configStates.end());
+     return 0;
+ }
+ 
+ int FRCNDEClient::SetCNDEStatePeriod(int period)
+ {
++    std::unique_lock<std::mutex> lock(recvCNDEPkgMutex, std::try_to_lock);
++    if (!lock.owns_lock() || robotStateRunFlag) return ROBOT_SNAPSHOT_BUSY;
++
+     if (period < 4 || period > 1000)
+     {
+         return ERR_PARAM_VALUE;
+     }
++    InvalidateSnapshot(false, true);
+     robotStatePeriod = period;
+ 
+     return 0;
+diff --git a/libfairino/src/src/Robot/RobotRealtimeState.cpp b/libfairino/src/src/Robot/RobotRealtimeState.cpp
+index 1f5267e..6582a2e 100644
+--- a/libfairino/src/src/Robot/RobotRealtimeState.cpp
++++ b/libfairino/src/src/Robot/RobotRealtimeState.cpp
+@@ -79,4 +79,11 @@ errno_t FRRobot::GetRobotRealtimeStateConfig(std::vector<RobotState>& states, in
+ 	}
+ 
+ 	return cndeClient->GetCNDEStateConfig(states, period);
+-}
+\ No newline at end of file
++}
++// No IsSockError here: it can wait for reconnect. Snapshot validity/epoch is
++// supplied by the receiver; this call never renews receipt metadata.
++errno_t FRRobot::GetRobotRealTimeStateSnapshot(RobotStateSnapshot* snapshot)
++{
++    if (!snapshot) return ROBOT_SNAPSHOT_INVALID_ARGUMENT;
++    return cndeClient->GetStateSnapshot(snapshot);
++}
+diff --git a/libfairino/src/include/Robot-EN/robot_state_snapshot.h b/libfairino/src/include/Robot-EN/robot_state_snapshot.h
+new file mode 100644
+index 0000000..cab1fc4
+--- /dev/null
++++ b/libfairino/src/include/Robot-EN/robot_state_snapshot.h
+@@ -0,0 +1,20 @@
++#pragma once
++#include "robot_types.h"
++#include <cstdint>
++
++// Candidate additive API. Metadata is local receipt/publication evidence, NOT
++// robot acquisition age, command acknowledgement, or physical completion.
++struct RobotStateSnapshot {
++    ROBOT_STATE_PKG state{}; // only configured fields are meaningful
++    std::int64_t host_receive_steady_ns = 0; // complete frame returned by SDK recv
++    std::uint64_t producer_sequence = 0; // local publications, never command ID
++    std::uint64_t connection_epoch = 0; // local client lifetime only
++    std::uint64_t configuration_epoch = 0;
++    bool valid = false; // complete publication, NOT a freshness/connection-health claim
++};
++enum RobotStateSnapshotResult {
++    ROBOT_SNAPSHOT_OK = 0,
++    ROBOT_SNAPSHOT_UNAVAILABLE = -1,
++    ROBOT_SNAPSHOT_BUSY = -2,
++    ROBOT_SNAPSHOT_INVALID_ARGUMENT = -3
++};

@@ -20,16 +20,33 @@ lock. This is a coherence gap, not proof of historical dataset corruption. Publi
 header tokens match the installed headers after removing comments/whitespace;
 that is source compatibility evidence, not rebuilt binary qualification.
 
-The existing Rollout owner received a CPU-only coherent publication/getter task
-in the isolated local checkout
-`.agent-local/work/controller-clock-probe/sdk-source-0553c35`. Root retains tracked
-FR5 adoption, actual device effects and integration. Reuse the existing CNDE
-decoder; no parallel connection, firmware update or SDK deployment is authorized
-by that task. The SDK candidate must return original receipt time and frame/
-connection identity without claiming those prove source acquisition age. Pending
-CPU/build work does not complete the physical boundary. Owner review is Orca
-`msg_a0ce3428705a`; handoff route is
-`fbf49644305155f291706fe8f63f02786f9bcdd63bb62c0da3819b879fc49a46`.
+SDK publication/getter candidate completed: Orca `msg_c38d80b9c884`, canonical
+`patches/fairino-cpp-sdk-2.3.7.patch`, SHA-256
+`57cdfbfe3304dfaebb956bcc4ee3ea8d4a72b76376a020701afac8e4dea478cf`.
+Worker and independent root replay each passed seven actual producer/getter
+cases. The committed opt-in `tests.data_factory.rollout.test_sdk_snapshot` then
+exported the untouched pinned Git source, applied the canonical patch, built it
+and passed all seven cases in 11.741 seconds with zero fixture network syscalls.
+Ordinary test discovery skips this external-SDK integration test explicitly.
+
+Bounded ABI checks retain every original exported FRRobot method and matching
+FRRobot/state sizes and joint/calendar/gripper offsets; they are not complete
+runtime ABI or physical qualification. Root's first fixture launch resolved the
+old installed SDK through inherited LD_LIBRARY_PATH and failed with the new
+symbol missing. The reproducible test now pins and verifies its candidate loader
+path. No SDK was installed and no robot connection was attempted.
+
+The same Rollout owner now implements the actual native/Python consumer in
+`.agent-local/work/controller-clock-probe/native-successor-6682-HzKknp`, an exact
+main `6682f27` export, leaving its historical worktree intact. Route
+`7fe13b67ddb3223d89f654f311b899b48fe69468ccbfebc1081d6162a7a23d09`
+binds this CPU-only continuation. Root owns independent integration, full
+regression and physical effects. The native successor is not yet qualified.
+
+The selected 4032 policy-only tree was rehashed unchanged as
+`sha256:aa5ca010131f5bd00c605ab0b9017f27f2c3906c8017502a1ba1915916b8f4e7`.
+It remains an available execution candidate, not a proven best model or task
+success. No retraining or model load is needed merely to repeat that identity.
 
 Correction: configured fields 3–75 include `LastServoTarget` (75), but exclude
 `ServoJCmdNum` (76). Neither currently establishes a device command-ID echo.

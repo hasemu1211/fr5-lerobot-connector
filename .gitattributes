@@ -1,1 +1,3 @@
 patches/*.patch -whitespace
+# Preserve mixed upstream CRLF and legacy-encoded patch context byte-for-byte.
+patches/fairino-cpp-sdk-2.3.7.patch -text
