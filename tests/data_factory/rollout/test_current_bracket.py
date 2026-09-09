@@ -46,8 +46,8 @@ class CurrentBracketTest(unittest.TestCase):
         cls.binary = root / "native"
         subprocess.run(["g++", "-std=c++17", "-pthread", str(root / "native.cpp"), "-o", str(cls.binary)], check=True, capture_output=True)
 
-    def packet(self, mode="fresh", *, command_budget_ms=None, query_delay_ms=0):
-        policy = temporal_policy()
+    def packet(self, mode="fresh", *, command_budget_ms=None, query_delay_ms=0, max_age_s=.08):
+        policy = temporal_policy(max_age_s=max_age_s)
         argv = [str(self.binary), mode, ",".join(map(repr, native_temporal_parameter(policy)))]
         if command_budget_ms is not None or query_delay_ms:
             argv.extend((str(command_budget_ms or 0), str(query_delay_ms)))
@@ -55,6 +55,21 @@ class CurrentBracketTest(unittest.TestCase):
                                 capture_output=True, text=True, timeout=3)
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout), policy
+
+    def test_native_acquisition_latency_characterization_without_commands(self):
+        # Characterize the current quarter-budget policy before selecting a fix.
+        # 37 ms approximates an observed RPC tail, not a qualified latency bound.
+        for delay, accepted in ((2, True), (37, False), (120, False)):
+            with self.subTest(query_delay_ms=delay):
+                packet, policy = self.packet("query_budget", query_delay_ms=delay, max_age_s=.1)
+                self.assertEqual(packet, {"accepted": accepted, "error": 0 if accepted else -5,
+                                          "moves": 0, "arm_sends": 0})
+                self.assertEqual(policy["max_age_s"], .1)
+
+    def test_single_acquisition_pass_does_not_prove_continuous_renewal(self):
+        packet, _ = self.packet("renewal_schedule")
+        self.assertEqual(packet, {"first_ready": True, "old_valid_during_renewal": False,
+                                  "old_valid_at_next_ready": False})
 
     def evidence(self, packet, binding):
         from control_msgs.msg import DynamicJointState, InterfaceValue

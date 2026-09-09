@@ -16,6 +16,45 @@ int main(int argc, char **argv) {
   }
   std::istringstream input(argv[2]);std::string value;
   while(std::getline(input,value,','))h.node->parameter.values.push_back(std::stod(value));
+  if(mode=="query_budget") {
+    // Acquisition only: real native producer, mock clock and SDK. No write(),
+    // gripper worker, servo call or physical device participates in this probe.
+    assert(argc==5);
+    h._precise_clock->delay_ms=std::stoi(argv[4]);
+    std::atomic<bool> done{false}; bool accepted=false;
+    const auto started=std::chrono::steady_clock::now();
+    std::thread acquisition([&]{accepted=h.refresh_gripper_freshness();done=true;});
+    while(!done) {
+      h.sample_gripper_evidence();
+      if(std::chrono::steady_clock::now()-started>std::chrono::seconds(1)) {
+        std::lock_guard<std::mutex> lock(h._gripper_mutex);h._stop_gripper_thread=true;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    acquisition.join();
+    std::cout<<"{\"accepted\":"<<(accepted?"true":"false")
+      <<",\"error\":"<<h._gripper_error<<",\"moves\":"<<r.moves
+      <<",\"arm_sends\":"<<r.arm_sends<<"}\n";
+    return 0;
+  }
+  if(mode=="renewal_schedule") {
+    // Synthetic timing counterexample, NOT measured hardware evidence.
+    // Two 37 ms RPCs produce a valid certificate, but repeating that work
+    // serially cannot cover a 100 ms lease anchored at the original start.
+    std::array<double,92> c{};
+    c[0]=3.; c[27]=c[35]=1.; c[42]=.1; c[66]=.001;
+    c[12]=1970.; c[13]=c[14]=1.; c[17]=10.; c[18]=40.;
+    c[36]=10.; c[37]=10.074; c[58]=10.040;
+    c[38]=10.; c[39]=20.; c[40]=10.074; c[41]=20.074;
+    c[9]=c[59]=10.040; c[10]=c[60]=20.040;
+    const bool first=current_gripper_fresh(c,10.074,20.074,.1);
+    const bool during=current_gripper_fresh(c,10.101,20.101,.1);
+    const bool next=current_gripper_fresh(c,10.148,20.148,.1);
+    std::cout<<"{\"first_ready\":"<<(first?"true":"false")
+      <<",\"old_valid_during_renewal\":"<<(during?"true":"false")
+      <<",\"old_valid_at_next_ready\":"<<(next?"true":"false")<<"}\n";
+    return 0;
+  }
   if(mode=="command_99") {r.terminal_scenario=4;h._last_gripper_command=.015;h._jnt_position_command[6]=.015;}
   h._gripper_thread=std::thread([&]{h.gripper_worker();});
   auto pump=[&](int milliseconds) {

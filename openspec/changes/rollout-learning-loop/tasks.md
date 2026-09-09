@@ -11,6 +11,12 @@
 - [x] Reproduce overlapping inference through separate finite consumers sharing one loaded policy.
 - [x] Reject the competing consumer before shared model/processor reset and preserve sequential reuse after success or failure.
 
+## Execution architecture qualification
+
+- [x] Characterize native RPC-budget rejection without commands and falsify single-acquisition success as proof of continuous certificate renewal; retain the distinction from physical measurements in `design.md`.
+- [ ] Qualify sustainable feedback certification and fault propagation, comparing total-budget correction with responsibility/scheduling correction before deployment; preserve source identity, original freshness and motion authority.
+- [ ] Compare the installed LeRobot rollout/Robot seam against the current full-chunk consumer, including transformed/sent evidence and teardown ownership; adopt upstream functionality where total integration and maintenance cost is lower.
+
 This bounded outcome preserves the continuing Rollout Goal. Actual
 checkpoint admission, resource assignment, physical qualification and
 condition-level task-effect/data-utility evidence remain separate outcomes.
