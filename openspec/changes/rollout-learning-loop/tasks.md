@@ -1,3 +1,7 @@
+Session transition: see [handoff.md](handoff.md) for the 2026-09-09 candidate,
+live regression handle and unqualified physical boundary. Revalidate its runtime
+observations; this pointer does not mark the unfinished tasks below complete.
+
 ## Native processor readiness
 
 - [x] Reproduce a loader-admitted state normalization bypass with installed saved processors and synthetic CPU inputs.
