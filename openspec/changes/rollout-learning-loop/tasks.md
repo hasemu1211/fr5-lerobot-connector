@@ -18,6 +18,8 @@ observations; this pointer does not mark the unfinished tasks below complete.
 ## Execution architecture qualification
 
 - [x] Characterize native RPC-budget rejection without commands and falsify single-acquisition success as proof of continuous certificate renewal; retain the distinction from physical measurements in `design.md`.
+- [ ] Verify a coherent complete-frame publication/getter candidate against the matching manufacturer SDK decoder, including concurrent reads, original receipt retention and reconnect invalidation; build in isolation without device or deployment effects.
+- [ ] Integrate a versioned successor separating current-state delivery, command-specific completion and soft clock-alignment quality; preserve archived readers and test normal continuation as well as genuine delivery/command failures before physical qualification.
 - [ ] Qualify sustainable feedback certification and fault propagation, comparing total-budget correction with responsibility/scheduling correction before deployment; preserve source identity, original freshness and motion authority.
 - [ ] Compare the installed LeRobot rollout/Robot seam against the current full-chunk consumer, including transformed/sent evidence and teardown ownership; adopt upstream functionality where total integration and maintenance cost is lower.
 

@@ -6,6 +6,35 @@ master plan. Re-read source, actual process state and Orca before relying on it.
 Orca owns execution messages. Replace stale observations rather than accumulating
 another history. No real rollout success is claimed here.
 
+## Current continuation — coherent delivery and minimum sufficient guarantees
+
+The user approved separating necessary execution evidence from optional temporal
+precision. `design.md` and the successor requirement define this boundary;
+existing version 3/4 readers and deployed thresholds are unchanged. No learned
+Pick has executed. The earlier physical certificate-renewal failure remains open.
+
+Matching manufacturer source is pinned to `fairino-cpp-sdk`
+`0553c35d760a4e76c9b8d2fc0208ca83e6d731cd`. Its receive thread updates cached fields
+in place while `GetRobotRealTimeState` copies them without a shared publication
+lock. This is a coherence gap, not proof of historical dataset corruption. Public
+header tokens match the installed headers after removing comments/whitespace;
+that is source compatibility evidence, not rebuilt binary qualification.
+
+The existing Rollout owner received a CPU-only coherent publication/getter task
+in the isolated local checkout
+`.agent-local/work/controller-clock-probe/sdk-source-0553c35`. Root retains tracked
+FR5 adoption, actual device effects and integration. Reuse the existing CNDE
+decoder; no parallel connection, firmware update or SDK deployment is authorized
+by that task. The SDK candidate must return original receipt time and frame/
+connection identity without claiming those prove source acquisition age. Pending
+CPU/build work does not complete the physical boundary. Owner review is Orca
+`msg_a0ce3428705a`; handoff route is
+`fbf49644305155f291706fe8f63f02786f9bcdd63bb62c0da3819b879fc49a46`.
+
+Correction: configured fields 3–75 include `LastServoTarget` (75), but exclude
+`ServoJCmdNum` (76). Neither currently establishes a device command-ID echo.
+Do not use a presumed counter as freshness or completion evidence.
+
 ## Resumed qualification result — supersedes pending observations below
 
 The user resumed the existing Goal and authorized removing redundant procedural

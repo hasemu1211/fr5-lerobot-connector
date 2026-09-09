@@ -68,6 +68,43 @@ store detects arbitrary people or unregistered obstacles.
   duration are different contracts. Do not infer a hardware safety limit from
   camera FPS or silently reuse one numeric bound as another authority.
 
+## Minimum sufficient execution evidence
+
+The next opt-in adapter shall separate coherent state delivery, command completion
+and cross-clock alignment quality. This is a successor contract, not permission
+to reinterpret or bypass the deployed version 3/4 certificate reader.
+
+Current-state delivery must preserve one complete native frame, its original host
+receipt time, publication sequence and connection/configuration identity. A getter
+or ROS republish cannot renew that receipt. Missing/expired delivery, a changed
+connection, regressing source state, device faults and unresolved motion ownership
+remain execution concerns. A recent receipt alone does not establish physical
+acquisition age or rule out a buffered TCP backlog; those limitations must remain
+explicit in qualification, not hidden behind a `source_timestamp` name.
+
+Precise clock alignment is a separate quality result. A slow optional clock query
+must not by itself turn otherwise qualified arm-state delivery into hardware
+ERROR. Where post-command timing is needed to establish gripper completion, that
+evidence remains required at the completion/release boundary, with its original
+command, generation, deadline and proof instant. Historical completion is not
+recertified on every later arm write. A failed required command proof cannot be
+downgraded to a quality warning. No new safety threshold is selected here.
+
+This separation follows the distinction between receipt and reconstructed device
+time in the [UR RTDE publisher](https://docs.universal-robots.com/Universal_Robots_ROS_Documentation/rolling/doc/ur_rtde_ros2_publisher/doc/usage.html).
+Its timing offsets and robot-specific assumptions are not FR5 limits. In
+ros2_control, ERROR invokes the hardware lifecycle error path; it is not an
+appropriate label for missing optional analysis precision.
+
+The matching manufacturer source at `fairino-cpp-sdk` commit
+`0553c35d760a4e76c9b8d2fc0208ca83e6d731cd` exposes a prerequisite: the CNDE receive
+thread mutates shared state field by field, while `GetRobotRealTimeState` copies
+it without the receive mutex. Reuse that decoder with a short coherent publication
+boundary, not another connection or the mutex held across blocking receive.
+This source finding is not evidence that recorded datasets are corrupted. Fields
+3–75 include the last ServoJ target, but not field 76's command count; neither is
+an established same-command completion acknowledgement.
+
 ## Why timeout-only qualification is insufficient
 
 The baseline native `refresh_gripper_freshness` before `e7f22e7` allocates

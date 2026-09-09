@@ -1021,6 +1021,10 @@ This ordering adds no Scene store, execution owner or task-success authority.
 
 ### Requirement: Current source freshness is independent of retained command completion
 
+The following query-bracket requirements specify the existing version 3/4
+certificate mechanism. A separately versioned successor SHALL preserve its
+historical reader semantics rather than silently change what those fields prove.
+
 The existing `require_gripper_source_clock=true` deployment opt-in SHALL select
 native evidence version 3. Its existing gripper worker SHALL bracket an exact
 native sampled frame with two precise read-only controller-clock queries outside
@@ -1106,6 +1110,41 @@ as proof of those properties or permission for physical execution.
 - **THEN** that flag alone SHALL NOT complete the native command
 - **AND** fresh done within the existing one-percent native feedback tick of the quantized requested target remains admissible, while off-target completion requires witnessed post-acknowledgment busy-to-done or plausible observed movement followed by the existing stable-away dwell across valid advancing samples
 - **AND** stable-away completion remains mechanical evidence, not grasp, release or task success
+
+### Requirement: Execution necessities are distinct from optional temporal quality
+
+A successor native state interface SHALL distinguish coherent current-state
+delivery, command-attributed completion and cross-clock alignment quality.
+It SHALL reuse the existing receive owner and preserve original receipt and
+source times without identifying one as the other. Repeated reads SHALL NOT
+refresh receipt time or publication identity. Connection/configuration changes
+SHALL invalidate prior delivery identity. Qualification SHALL distinguish recent
+host receipt from physical acquisition age and buffered-stream delay.
+
+The execution owner SHALL enforce its selected state-delivery validity, device
+faults, motion ownership and command completion requirements. Optional precision
+loss alone SHALL NOT deactivate otherwise qualified execution. A timing proof
+required to attribute a gripper result SHALL still be enforced at that command's
+completion/release boundary; its loss SHALL NOT be classified as merely soft
+quality. Historical command evidence SHALL retain its original validation instant
+and SHALL NOT require renewal for unrelated subsequent arm writes.
+
+This separation SHALL NOT rewrite stored evidence, datasets, checkpoints or
+already approved plans. A changed live mechanism SHALL be explicitly versioned,
+tested through its actual producer and consumer, and physically qualified before
+promotion. It SHALL NOT introduce new per-attempt human or visual approval gates.
+
+#### Scenario: Optional clock alignment is delayed while execution state is valid
+
+- **WHEN** the successor interface provides qualified current-state delivery and no required command proof is outstanding, but optional clock alignment is unavailable
+- **THEN** the existing authorized arm path remains eligible and alignment quality is reported separately
+- **AND** receipt time is not reported as physical acquisition time
+
+#### Scenario: Required delivery or command evidence is unavailable
+
+- **WHEN** delivery has expired, connection identity changed, a device fault occurred, or a required command completion proof is unresolved
+- **THEN** the affected execution is blocked through its existing owner
+- **AND** a soft quality result cannot authorize release or revive that evidence
 
 ### Requirement: Native caller consumes assisted learned continuation
 
