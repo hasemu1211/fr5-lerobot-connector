@@ -6,7 +6,45 @@ master plan. Re-read source, actual process state and Orca before relying on it.
 Orca owns execution messages. Replace stale observations rather than accumulating
 another history. No real rollout success is claimed here.
 
-## Outcome and nearest critical path
+## Resumed qualification result — supersedes pending observations below
+
+The user resumed the existing Goal and authorized removing redundant procedural
+constraints, not bypassing existing execution authority. Full regression completed:
+**1,313 tests, 1,526.949 seconds, exit 0**. Log SHA-256:
+`dcf55f0695fcca5fa998afdb74d74504985a93393d8d0f2d3b8da19bf31e5e8e`.
+PID 4129485 has exited and session 79732 returned its terminal result. Do not rerun
+this suite solely because the old handoff below describes it as running.
+
+Candidate physical continuity **failed**, despite the CPU PASS. At 13:05:45 KST
+the exact candidate emitted `GRIPPER_INITIAL_CERTIFICATE_STALE`, original system
+and steady age 0.100725s against selected 0.100000s. It then cancelled an in-flight
+clock query (`curl=42`, cancelled=1, elapsed 0.085370s, timeout 99ms). Hardware
+ERROR deactivated the controllers; the Python `ROS_JOINT_STATE_STALE` was a
+downstream symptom, not the first cause. This does not establish the server's
+eventual reply time or prove a particular network cause.
+
+Canonical log:
+`/home/codelab/.ros/log/2026-09-09-13-05-39-202690-codelab-System-Product-Name-5474/launch.log`.
+The bounded stack ended; PIDs 5676/5677/5678 were confirmed gone. No learned or
+gripper goal was submitted. Native activation/current-position hold did occur.
+Do not promote this candidate as physically qualified or repeat it unchanged
+without a new discriminating observation.
+
+Launch used the temporary candidate package overlay and must explicitly set
+`FR5_REQUIRE_GRIPPER_SOURCE_CLOCK=true` inside that shell. A preceding trial
+omitted the opt-in, loaded the correct library but rejected the undeclared policy
+parameter; that was not a renewal experiment. `/proc` mappings verified the
+candidate library. Main and rollout-evolution installed libraries remain untouched.
+The private readiness helper now adds the repository import root and allows 20s
+for initial ROS discovery only; all selected freshness bounds remain unchanged.
+
+The next engineering question is why acquisition cannot renew the original lease
+during real hold, and whether the selected certification mechanism's cost and
+fault propagation fit execution needs. Preserve raw evidence and distinguish
+valid old evidence with renewal pending, true expiry, and actual controller fault.
+Do not treat another timeout increase or another framework as an established fix.
+
+## Outcome and nearest critical path (original transition snapshot)
 
 Produce an actual trained Pick, qualified mechanical release/reset, retained
 diagnosis and a consumed targeted-recollection path, then learning/portfolio

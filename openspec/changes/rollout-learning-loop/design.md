@@ -39,6 +39,21 @@ describe a different revision.
 
 ## Responsibilities to retain or repair
 
+Apply requirements at the action that consumes them. Reuse static qualification
+within its source/model/configuration scope; reopen it only for relevant changes
+or counterevidence. Recheck mutable scene, cell, ownership and freshness at their
+existing consumption boundaries. Do not make later training utility or whole-task
+success a prerequisite for a bounded hardware diagnostic. An implementation's
+chosen timeout is revisable engineering policy, not automatically a physical
+safety invariant.
+
+The approved product domain and existing SceneStateStore/scene/cell contracts
+govern the environment assumptions. Do not add coordinator visual approval,
+per-attempt person-absence approval, or a new perception gate. Existing mapped
+illumination checks belong in the system execution path; an agent's preview is
+diagnostic assistance, not runtime authority. This does not claim that the scene
+store detects arbitrary people or unregistered obstacles.
+
 - Policy proposes actions; it neither approves collision safety nor sends SDK
   commands. Admission validates the proposed motion against current state,
   registered geometry and selected limits. The sole executor owns dispatch,
@@ -55,7 +70,7 @@ describe a different revision.
 
 ## Why timeout-only qualification is insufficient
 
-The native `refresh_gripper_freshness` in `patches/frcobot_ros2.patch` allocates
+The baseline native `refresh_gripper_freshness` before `e7f22e7` allocates
 one quarter of the selected age to each RPC and half to the first-query/frame
 stage. Its exception path sets `_gripper_error=-5`; `read()` then returns hardware
 ERROR. The query already runs outside the main read/write thread, so merely
