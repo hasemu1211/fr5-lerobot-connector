@@ -6,6 +6,33 @@ master plan. Re-read source, actual process state and Orca before relying on it.
 Orca owns execution messages. Replace stale observations rather than accumulating
 another history. No real rollout success is claimed here.
 
+## Physical coherent-delivery qualification — 2026-09-11
+
+The v5 coherent-delivery successor passed a bounded real-FR5 current-position
+hold qualification. The run used the isolated coherent SDK/plugin overlay with
+`FR5_REQUIRE_GRIPPER_SOURCE_CLOCK=true` and
+`FR5_REQUIRE_COHERENT_SNAPSHOT=true`.
+
+After the post-bind bootstrap publication, the readiness probe observed 10.0007 s
+of valid wire-v5 delivery with producer sequence advancing from 593 to 1841,
+999 distinct progress events, connection epoch 1 and configuration epoch 0
+remaining stable. The probe accepted 3,999 reads; 3,000 repeated reads were not
+counted as source progress. `READINESS_RC=0` and
+`NATIVE_V5_READINESS_PASS` were produced. No learned trajectory or gripper goal
+was submitted by the probe.
+
+The earlier immediate `LEARNED_HARDWARE_STALE` result was a diagnostic bootstrap
+race: policy binding completed before the first new coherent publication was
+observed. The diagnostic was corrected to wait up to one second only for the
+first strictly newer post-bind producer sequence; the existing 100 ms live
+freshness bound was not relaxed after readiness.
+
+This qualifies bounded physical coherent-state continuity for the current-position
+hold only. It does not qualify learned Pick success, physical gripper
+same-command completion, mechanical task success, or long-duration operation.
+Shutdown-time RViz/controller-manager context errors occurred after successful
+hardware deactivation and are not counted as execution evidence.
+
 ## Current continuation — coherent delivery and minimum sufficient guarantees
 
 The user approved separating necessary execution evidence from optional temporal
