@@ -137,7 +137,7 @@ DESTINATION_KEYS = {
     "job", "selected_sheet", "yaw0_sheet", "motion_qualification",
 }
 LIVE_RUN_KEYS = COMMON_RUN_KEYS | {"camera_profile", "dataset_root", "run_root"}
-LEARNED_RUN_KEYS = {"learned_checkpoint", "gripper_source_clock", "gripper_temporal_policy", "learned_device", "learned_reference_mode"}
+LEARNED_RUN_KEYS = {"learned_checkpoint", "gripper_source_clock", "gripper_temporal_policy", "learned_device", "learned_reference_mode", "learned_robot_model_trial_urdf"}
 RESPONSE_KEYS = {"schema_version", "op_id", "op", "ok", "code", "state", "run_id", "plan_digest", "data"}
 EVENT_KEYS = {"schema_version", "event", "sequence", "origin_op_id", "ok", "code", "state", "run_id", "plan_digest", "data"}
 EPISODE_LEDGER_CONTEXT_FIELDS = frozenset({"manifest", "intent"})
@@ -229,18 +229,61 @@ def _learned_options(value):
     supplied = set(value) & LEARNED_RUN_KEYS
     if not supplied:
         return None
-    hardware_keys = supplied & {"gripper_source_clock", "gripper_temporal_policy"}
-    if "learned_checkpoint" not in supplied or len(hardware_keys) != 1:
+
+    hardware_keys = supplied & {
+        "gripper_source_clock",
+        "gripper_temporal_policy",
+    }
+    if (
+        "learned_checkpoint" not in supplied
+        or len(hardware_keys) != 1
+    ):
         raise ContractError("LEARNED_RUN_INPUTS")
+
     for key in supplied:
         _text(value[key], "LEARNED_RUN_INPUTS")
-    if value.get("learned_device", "cpu") not in {"cpu", "cuda"}:
+
+    if value.get("learned_device", "cpu") not in {
+        "cpu",
+        "cuda",
+    }:
         raise ContractError("LEARNED_RUN_INPUTS")
-    if "learned_reference_mode" in value and value["learned_reference_mode"] not in {"serialized_retime", "serialized_percent_retime"}:
+
+    if (
+        "learned_reference_mode" in value
+        and value["learned_reference_mode"]
+        not in {
+            "serialized_retime",
+            "serialized_percent_retime",
+        }
+    ):
         raise ContractError("LEARNED_RUN_INPUTS")
-    return {"checkpoint": value["learned_checkpoint"], **{key: value[key] for key in hardware_keys},
-            **({"reference_mode": value["learned_reference_mode"]} if "learned_reference_mode" in value else {}),
-            "device": value.get("learned_device", "cpu")}
+
+    if (
+        "learned_robot_model_trial_urdf" in supplied
+        and value.get("mode") != "plan_only"
+    ):
+        raise ContractError(
+            "LEARNED_ROBOT_MODEL_TRIAL_SCOPE"
+        )
+
+    result = {
+        "checkpoint": value["learned_checkpoint"],
+        **{key: value[key] for key in hardware_keys},
+        **(
+            {"reference_mode": value["learned_reference_mode"]}
+            if "learned_reference_mode" in value
+            else {}
+        ),
+        "device": value.get("learned_device", "cpu"),
+    }
+
+    if "learned_robot_model_trial_urdf" in supplied:
+        result["robot_model_trial_urdf"] = value[
+            "learned_robot_model_trial_urdf"
+        ]
+
+    return result
 
 
 def _run_payload(value):
@@ -2390,50 +2433,153 @@ def _write_episode_ledger(
     }
 
 
-def _infer_native_program(native, source, child, cancel, *, urdf, instruction, period_s,
-                          observation=None, camera_topics=None, max_observation_age_s=.3,
-                          held_gripper_targets=False, runtime_inputs=None, serialized_references=False):
-    from tools.data_factory.rollout.finite_plan import FinitePolicyInference, compile_program
+def _infer_native_program(
+    native,
+    source,
+    child,
+    cancel,
+    *,
+    urdf,
+    instruction,
+    period_s,
+    observation=None,
+    camera_topics=None,
+    max_observation_age_s=.3,
+    held_gripper_targets=False,
+    runtime_inputs=None,
+    serialized_references=False,
+    robot_model_trial_urdf=None,
+):
+    from tools.data_factory.rollout.finite_plan import (
+        FinitePolicyInference,
+        build_robot_model_trial,
+        compile_program,
+    )
+
     with native.prepare_inference() as predict:
-        # The existing non-motion owner verifies checkpoint bytes before yielding
-        # its loaded tensors; bind the runtime file here too, before capture.
+        # The existing non-motion owner verifies checkpoint bytes before
+        # yielding its loaded tensors; bind the runtime file here too.
         if runtime_inputs is not None:
-            from tools.data_factory.rollout.task_authority import check_runtime_source
+            from tools.data_factory.rollout.task_authority import (
+                check_runtime_source,
+            )
             check_runtime_source(runtime_inputs)
+
         if cancel.is_set():
             raise ContractError("LEARNED_CANCELLED")
-        inference = FinitePolicyInference(predict, native.checkpoint, cancel_event=cancel)
+
+        inference = FinitePolicyInference(
+            predict,
+            native.checkpoint,
+            cancel_event=cancel,
+        )
+
         if observation is None:
-            captured = _runtime_child_request(child, {
-                "schema_version": "fr5.pickup_executor.command.v4",
-                "op_id": "learned-observation", "op": "capture_observation",
-                "payload": {"camera_topics": camera_topics, "max_observation_age_s": max_observation_age_s},
-            }, cancel)
+            captured = _runtime_child_request(
+                child,
+                {
+                    "schema_version":
+                        "fr5.pickup_executor.command.v4",
+                    "op_id": "learned-observation",
+                    "op": "capture_observation",
+                    "payload": {
+                        "camera_topics": camera_topics,
+                        "max_observation_age_s":
+                            max_observation_age_s,
+                    },
+                },
+                cancel,
+            )
             if not captured.get("ok"):
-                raise ContractError(captured.get("code", "LEARNED_OBSERVATION_UNAVAILABLE"))
+                raise ContractError(
+                    captured.get(
+                        "code",
+                        "LEARNED_OBSERVATION_UNAVAILABLE",
+                    )
+                )
             observation = captured["data"]["observation"]
-        observation = copy.deepcopy(observation() if callable(observation) else observation)
-        for key in ("observation.images.camera1", "observation.images.camera2"):
+
+        observation = copy.deepcopy(
+            observation() if callable(observation) else observation
+        )
+
+        for key in (
+            "observation.images.camera1",
+            "observation.images.camera2",
+        ):
             frame = observation[key]
             if "data_hex" in frame:
-                if set(frame) != {"dtype", "color_space", "shape", "data_hex"}:
-                    raise ContractError("LEARNED_OBSERVATION_SCHEMA")
+                if set(frame) != {
+                    "dtype",
+                    "color_space",
+                    "shape",
+                    "data_hex",
+                }:
+                    raise ContractError(
+                        "LEARNED_OBSERVATION_SCHEMA"
+                    )
                 try:
-                    frame["data"] = bytes.fromhex(frame.pop("data_hex"))
+                    frame["data"] = bytes.fromhex(
+                        frame.pop("data_hex")
+                    )
                 except (TypeError, ValueError) as exc:
-                    raise ContractError("LEARNED_OBSERVATION_SCHEMA") from exc
+                    raise ContractError(
+                        "LEARNED_OBSERVATION_SCHEMA"
+                    ) from exc
+
         if cancel.is_set():
             raise ContractError("LEARNED_CANCELLED")
+
+        try:
+            source_robot_description = Path(urdf).read_text()
+            candidate_robot_description = (
+                source_robot_description
+                if robot_model_trial_urdf is None
+                else Path(
+                    robot_model_trial_urdf
+                ).read_text()
+            )
+        except OSError as exc:
+            raise ContractError(
+                "LEARNED_ROBOT_MODEL_TRIAL_IO"
+            ) from exc
+
+        robot_model_trial = None
+        if robot_model_trial_urdf is not None:
+            robot_model_trial = build_robot_model_trial(
+                source,
+                source_robot_description,
+                candidate_robot_description,
+            )
+
         proposal = inference.propose(
-            observation, instruction=instruction,
-            robot_description=Path(urdf).read_text(),
-            period_s=period_s, max_observation_age_s=max_observation_age_s,
-            held_gripper_targets=held_gripper_targets, runtime_inputs=runtime_inputs,
-            serialized_references=serialized_references or "reference_mode" in (runtime_inputs or {}),
-            quantize_gripper=(runtime_inputs or {}).get("reference_mode") == "serialized_percent_retime",
-            velocity_scaling=min(step["limits"]["velocity_scaling"] for step in source["steps"] if "velocity_scaling" in step["limits"]),
+            observation,
+            instruction=instruction,
+            robot_description=candidate_robot_description,
+            period_s=period_s,
+            max_observation_age_s=max_observation_age_s,
+            held_gripper_targets=held_gripper_targets,
+            runtime_inputs=runtime_inputs,
+            serialized_references=(
+                serialized_references
+                or "reference_mode" in (runtime_inputs or {})
+            ),
+            quantize_gripper=(
+                (runtime_inputs or {}).get("reference_mode")
+                == "serialized_percent_retime"
+            ),
+            velocity_scaling=min(
+                step["limits"]["velocity_scaling"]
+                for step in source["steps"]
+                if "velocity_scaling" in step["limits"]
+            ),
         )
-        return compile_program(source, proposal)
+
+        return compile_program(
+            source,
+            proposal,
+            robot_model_trial=robot_model_trial,
+        )
 
 
 def _native_run_inputs(payload, profile, cancel, *, instruction):
@@ -2442,6 +2588,11 @@ def _native_run_inputs(payload, profile, cancel, *, instruction):
     from tools.data_factory.rollout.gripper_evidence import validate_clock_binding
     from tools.fr5_dataset_schema import smolvla_camera_mapping
     options = _learned_options(payload)
+    runtime_options = {
+        key: value
+        for key, value in options.items()
+        if key != "robot_model_trial_urdf"
+    }
     roles = profile["camera_roles"]
     if len(roles) != 2:
         raise ContractError("LEARNED_MODEL_CAMERAS")
@@ -2450,7 +2601,7 @@ def _native_run_inputs(payload, profile, cancel, *, instruction):
               for key, slot in mapping.items()}
     if cancel.is_set():
         raise ContractError("LEARNED_CANCELLED")
-    native = NativeSmolVLA.load(options["checkpoint"], device=options["device"])
+    native = NativeSmolVLA.load(runtime_options["checkpoint"], device=runtime_options["device"])
     if cancel.is_set():
         raise ContractError("LEARNED_CANCELLED")
     # Artifact validation remains Learning-owned. This is the consuming sensor
@@ -2463,14 +2614,14 @@ def _native_run_inputs(payload, profile, cancel, *, instruction):
         raise ContractError("LEARNED_CANCELLED")
     # Bind the explicitly selected protocol after preparation. A temporal policy
     # does not fabricate or renew an archived controller-clock calibration.
-    causal = "gripper_temporal_policy" in options
+    causal = "gripper_temporal_policy" in runtime_options
     key = "gripper_temporal_policy" if causal else "gripper_source_clock"
     validator = validate_clock_binding
     if causal:
         from tools.data_factory.rollout.gripper_evidence import validate_temporal_policy
         validator = validate_temporal_policy
-    binding = validator(load_json_strict(Path(options[key])))
-    inputs = {**options, "clock_binding": binding, "camera_topics": topics,
+    binding = validator(load_json_strict(Path(runtime_options[key])))
+    inputs = {**runtime_options, "clock_binding": binding, "camera_topics": topics,
               "camera_mapping": mapping, "fps": profile["fps"], "warmup": warmup, "hardware_wire_version": (5 if binding["schema_version"] == "fr5.gripper_temporal_policy.v2" else 4) if causal else 2}
     return native, inputs
 
@@ -2478,7 +2629,8 @@ def _native_run_inputs(payload, profile, cancel, *, instruction):
 def run_learned_plan_only(payload, cancel, publish, *, checkpoint, observation=None, camera_topics=None,
                           instruction, period_s, max_observation_age_s=.3,
                           device="cpu", held_gripper_targets=False, gripper_source_clock=None, gripper_temporal_policy=None,
-                          resolver=resolve_inputs, executor_factory=_executor, serialized_references=False):
+                          resolver=resolve_inputs, executor_factory=_executor, serialized_references=False,
+                          robot_model_trial_urdf=None):
     """Native checkpoint-to-existing-planner entry point; no recorder or motion.
 
     Without a supplied offline observation, the existing motion child captures
@@ -2507,7 +2659,9 @@ def run_learned_plan_only(payload, cancel, publish, *, checkpoint, observation=N
         program = _infer_native_program(native, source, child, cancel,
             urdf=payload.get("urdf"), instruction=instruction, period_s=period_s,
             observation=observation, camera_topics=camera_topics, max_observation_age_s=max_observation_age_s,
-            held_gripper_targets=held_gripper_targets, serialized_references=serialized_references)
+            held_gripper_targets=held_gripper_targets,
+            serialized_references=serialized_references,
+            robot_model_trial_urdf=robot_model_trial_urdf)
         def planning_child(timeout_s):
             nonlocal transferred
             transferred = child is not None
@@ -2577,9 +2731,20 @@ def run_plan_only(payload, cancel, publish, *, resolver=resolve_inputs, executor
             ("gripper_source_clock", "gripper_temporal_policy") if key in learned} if learned is not None else {}))
         try:
             if native is not None:
-                program = _infer_native_program(native, program, executor, cancel,
-                    urdf=payload["urdf"], instruction=validated["normalized_job"]["instruction"],
-                    period_s=1 / inputs["fps"], camera_topics=inputs["camera_topics"], runtime_inputs=inputs)
+                program = _infer_native_program(
+                    native,
+                    program,
+                    executor,
+                    cancel,
+                    urdf=payload["urdf"],
+                    instruction=validated["normalized_job"]["instruction"],
+                    period_s=1 / inputs["fps"],
+                    camera_topics=inputs["camera_topics"],
+                    runtime_inputs=inputs,
+                    robot_model_trial_urdf=learned.get(
+                        "robot_model_trial_urdf"
+                    ),
+                )
                 trajectory_binding = None
             def recorder_forbidden(_):
                 raise ContractError("PLAN_ONLY_RECORDER_FORBIDDEN")
@@ -5380,6 +5545,13 @@ def _parser():
     parser.add_argument("--learned-device", choices=("cpu", "cuda"), help="Assigned inference device; defaults to cpu")
     parser.add_argument("--learned-reference-mode", choices=("serialized_retime", "serialized_percent_retime"),
                         help="Opt in before approval: retime all rows, optionally represent gripper values as integer percent, and wait for completion; five-second wall limit")
+    parser.add_argument(
+        "--learned-robot-model-trial-urdf",
+        help=(
+            "PLAN_ONLY only: explicit candidate URDF for a "
+            "non-executable robot-model trial"
+        ),
+    )
     for name in ("run-id", "job", "selected-sheet", "yaw0-sheet", "config-root", "motion-qualification", "home-candidate", "urdf", "expected-robot-system-id", "camera-profile", "dataset-root", "run-root"):
         parser.add_argument(f"--{name}")
     parser.add_argument("--recycle-x-mm", type=float)

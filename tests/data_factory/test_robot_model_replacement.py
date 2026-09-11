@@ -18,7 +18,13 @@ sys.path.insert(0, str(ROOT / "tools"))
 from fr5_lerobot_recorder import FR5LeRobotRecorder
 from tools.fr5_data_factory import ContractError, canonical_digest, validate_home_candidate
 from tools.data_factory.learned_action_adapter import fake_rgb
-from tools.data_factory.rollout.finite_plan import FinitePolicyInference, JOINTS, _limits, compile_program
+from tools.data_factory.rollout.finite_plan import (
+    FinitePolicyInference,
+    JOINTS,
+    _limits,
+    build_robot_model_trial,
+    compile_program,
+)
 from tests.data_factory.operator.fixtures import motion
 
 ORIGINAL = ROOT / "src/fairino_description/urdf/fairino5_v6.urdf"
@@ -103,6 +109,54 @@ class RobotModelReplacementTest(unittest.TestCase):
         compile_program(source, proposals[0])
         with self.assertRaisesRegex(ContractError, "LEARNED_ROBOT_BINDING"):
             compile_program(source, proposals[1])
+
+        trial = build_robot_model_trial(
+            source,
+            ORIGINAL.read_text(),
+            CANDIDATE.read_text(),
+        )
+        candidate_program = compile_program(
+            source,
+            proposals[1],
+            robot_model_trial=trial,
+        )
+        self.assertFalse(
+            candidate_program["robot_model_trial"][
+                "execution_authorized"
+            ]
+        )
+        self.assertEqual(
+            candidate_program["robot_model_trial"][
+                "source_robot_description_digest"
+            ],
+            "sha256:" + ORIGINAL_SHA,
+        )
+        self.assertEqual(
+            candidate_program["robot_model_trial"][
+                "candidate_robot_description_digest"
+            ],
+            "sha256:" + hashlib.sha256(
+                CANDIDATE.read_bytes()
+            ).hexdigest(),
+        )
+
+        forged = ET.parse(CANDIDATE).getroot()
+        forged_limit = forged.find("./joint[@name='j1']/limit")
+        self.assertIsNotNone(forged_limit)
+        forged_limit.set("upper", "1.23456789")
+        forged_xml = ET.tostring(
+            forged,
+            encoding="unicode",
+        )
+        with self.assertRaisesRegex(
+            ContractError,
+            "LEARNED_ROBOT_MODEL_TRIAL_DELTA",
+        ):
+            build_robot_model_trial(
+                source,
+                ORIGINAL.read_text(),
+                forged_xml,
+            )
 
     def test_old_home_and_default_selection_remain_bound_to_original_model(self):
         home = json.loads((ROOT / "config/data_factory/home_candidates/fr5-lab-a-tcp-r002-home-r001.json").read_text())

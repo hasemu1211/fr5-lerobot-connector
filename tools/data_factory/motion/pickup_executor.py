@@ -818,6 +818,12 @@ class PickupExecutor:
             plan["learned_source_program"] = copy.deepcopy(motion_program["source_program"])
             # This is a finite probe, never evidence of a reset or scene transition.
             plan["execution_kind"] = "FINITE_LEARNED_PROBE"
+        if "robot_model_trial" in motion_program:
+            if proposal is None:
+                raise ContractError("LEARNED_ROBOT_MODEL_TRIAL_BINDING")
+            plan["robot_model_trial"] = copy.deepcopy(
+                motion_program["robot_model_trial"]
+            )
         if chunk_binding is not None:
             plan["learned_continuation"] = copy.deepcopy(chunk_binding)
         plan_digest = canonical_digest(plan)
@@ -1198,6 +1204,8 @@ class PickupExecutor:
         candidate = run.get("pending_chunk")
         if not candidate or candidate["digest"] != payload["candidate_plan_digest"] or candidate["state"] != "APPROVED":
             raise ContractError("LEARNED_NEXT_NOT_APPROVED")
+        if candidate["plan"].get("robot_model_trial") is not None:
+            raise ContractError("ROBOT_MODEL_TRIAL_EXECUTION_BLOCKED")
         if "task_grant" not in run:
             _future_timestamp(candidate["approval"]["approval_expiry"], self.clock())
         else:
@@ -1336,6 +1344,13 @@ class PickupExecutor:
                 raise ContractError("TASK_POLICY_BUDGET_EXHAUSTED")
         else:
             _future_timestamp(run["approval"]["approval_expiry"], self.clock())
+        if run["plan"].get("robot_model_trial") is not None:
+            return _response(
+                code="ROBOT_MODEL_TRIAL_EXECUTION_BLOCKED",
+                run_id=payload["run_id"],
+                plan_digest=payload["plan_digest"],
+                state="APPROVED",
+            )
         proposal = run["plan"].get("learned_proposal")
         if proposal is not None:
             if run["approval"]["approval_scope"] not in {"HUMAN_GATED", "SCOPED_TASK_GRANT"}:

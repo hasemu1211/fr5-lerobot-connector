@@ -21,6 +21,7 @@ PROGRAM_SCHEMA = "fr5.learned_motion_program.v1"
 PROPOSAL_SCHEMA = "data_factory.finite_learned_proposal.v1"
 HELD_PROPOSAL_SCHEMA = "data_factory.finite_learned_held_target_proposal.v1"
 REFERENCE_PROPOSAL_SCHEMA = "data_factory.finite_learned_serialized_reference_proposal.v1"
+ROBOT_MODEL_TRIAL_SCHEMA = "data_factory.robot_model_trial.v1"
 JOINTS = ["j1", "j2", "j3", "j4", "j5", "j6", "finger_right_joint"]
 UNITS = ["rad"] * 6 + ["m"]
 REFERENCE_TICK_S = .01
@@ -477,47 +478,411 @@ def check_segment_observation(segment, evidence, now, *, terminal=False, steady_
         raise ContractError("LEARNED_STATE_SCHEMA") from exc
 
 
-def _materialize(source, proposal, boundary="LEARNED_CHUNK_COMPLETE"):
-    # Existing source qualification is retained verbatim as context, not relabeled
-    # as evidence of learned effectiveness or physical qualification.
-    arm = next(step for step in source["steps"] if step["phase"] == "SAFE_POSE_PTP")
-    learned = {"phase": "LEARNED_CHUNK", "limits": copy.deepcopy(arm["limits"]),
-               "requires_confirmation": "PRECONTACT_HUMAN", "pause_after": boundary}
-    if proposal["schema_version"] in {HELD_PROPOSAL_SCHEMA, REFERENCE_PROPOSAL_SCHEMA}:
-        learned["held_target_segments"] = held_target_segments(source, proposal)
-    return {**copy.deepcopy(source), "schema_version": PROGRAM_SCHEMA,
-            "source_program": copy.deepcopy(source), "learned_proposal": copy.deepcopy(proposal),
-            "steps": [learned]}
+def _robot_description_digest(xml):
+    if not isinstance(xml, str) or not xml:
+        raise ContractError("LEARNED_ROBOT_MODEL_TRIAL_SCHEMA")
+    return "sha256:" + hashlib.sha256(xml.encode()).hexdigest()
+
+
+def _trial_vector(value):
+    try:
+        values = tuple(float(item) for item in value.split())
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ContractError("LEARNED_ROBOT_MODEL_TRIAL_DELTA") from exc
+    if len(values) != 3 or not all(math.isfinite(item) for item in values):
+        raise ContractError("LEARNED_ROBOT_MODEL_TRIAL_DELTA")
+    return values
+
+
+def _trial_coordinate_delta(source_xml, candidate_xml):
+    try:
+        source_root = ET.fromstring(source_xml)
+        candidate_root = ET.fromstring(candidate_xml)
+    except (ET.ParseError, TypeError) as exc:
+        raise ContractError("LEARNED_ROBOT_MODEL_TRIAL_XML") from exc
+
+    if (
+        source_root.get("name") != candidate_root.get("name")
+        or source_root.get("name") is None
+    ):
+        raise ContractError("LEARNED_ROBOT_MODEL_TRIAL_DELTA")
+
+    restored = copy.deepcopy(candidate_root)
+    changed = []
+
+    for joint_name in ("finger_right_joint", "finger_left_joint"):
+        source_joint = source_root.find(f"./joint[@name='{joint_name}']")
+        candidate_joint = candidate_root.find(f"./joint[@name='{joint_name}']")
+        restored_joint = restored.find(f"./joint[@name='{joint_name}']")
+
+        if (
+            source_joint is None
+            or candidate_joint is None
+            or restored_joint is None
+        ):
+            raise ContractError("LEARNED_ROBOT_MODEL_TRIAL_DELTA")
+
+        for tag in ("origin", "axis"):
+            source_part = source_joint.find(tag)
+            candidate_part = candidate_joint.find(tag)
+            restored_part = restored_joint.find(tag)
+
+            if (
+                source_part is None
+                or candidate_part is None
+                or restored_part is None
+            ):
+                raise ContractError("LEARNED_ROBOT_MODEL_TRIAL_DELTA")
+
+            source_attrs = dict(source_part.attrib)
+            candidate_attrs = dict(candidate_part.attrib)
+
+            if source_attrs != candidate_attrs:
+                if (
+                    source_attrs.get("xyz") is None
+                    or candidate_attrs.get("xyz") is None
+                    or {
+                        key: value
+                        for key, value in source_attrs.items()
+                        if key != "xyz"
+                    }
+                    != {
+                        key: value
+                        for key, value in candidate_attrs.items()
+                        if key != "xyz"
+                    }
+                ):
+                    raise ContractError("LEARNED_ROBOT_MODEL_TRIAL_DELTA")
+
+                changed.append(f"{joint_name}:{tag}.xyz")
+
+            restored_part.attrib = source_attrs
+
+    expected = [
+        "finger_right_joint:origin.xyz",
+        "finger_right_joint:axis.xyz",
+        "finger_left_joint:origin.xyz",
+        "finger_left_joint:axis.xyz",
+    ]
+    if changed != expected:
+        raise ContractError("LEARNED_ROBOT_MODEL_TRIAL_DELTA")
+
+    if ET.tostring(restored) != ET.tostring(source_root):
+        raise ContractError("LEARNED_ROBOT_MODEL_TRIAL_DELTA")
+
+    source_right = source_root.find("./joint[@name='finger_right_joint']")
+    candidate_right = candidate_root.find("./joint[@name='finger_right_joint']")
+    if source_right is None or candidate_right is None:
+        raise ContractError("LEARNED_ROBOT_MODEL_TRIAL_DELTA")
+
+    limit = source_right.find("limit")
+    candidate_limit = candidate_right.find("limit")
+    if limit is None or candidate_limit is None:
+        raise ContractError("LEARNED_ROBOT_MODEL_TRIAL_DELTA")
+
+    try:
+        lower = float(limit.get("lower"))
+        upper = float(limit.get("upper"))
+        candidate_lower = float(candidate_limit.get("lower"))
+        candidate_upper = float(candidate_limit.get("upper"))
+    except (TypeError, ValueError) as exc:
+        raise ContractError("LEARNED_ROBOT_MODEL_TRIAL_DELTA") from exc
+
+    if (
+        not all(
+            math.isfinite(value)
+            for value in (lower, upper, candidate_lower, candidate_upper)
+        )
+        or lower != 0.0
+        or candidate_lower != lower
+        or candidate_upper != upper
+        or upper <= lower
+    ):
+        raise ContractError("LEARNED_ROBOT_MODEL_TRIAL_DELTA")
+
+    for joint_name in ("finger_right_joint", "finger_left_joint"):
+        source_joint = source_root.find(f"./joint[@name='{joint_name}']")
+        candidate_joint = candidate_root.find(f"./joint[@name='{joint_name}']")
+
+        source_origin = _trial_vector(
+            source_joint.find("origin").get("xyz")
+        )
+        source_axis = _trial_vector(
+            source_joint.find("axis").get("xyz")
+        )
+        candidate_origin = _trial_vector(
+            candidate_joint.find("origin").get("xyz")
+        )
+        candidate_axis = _trial_vector(
+            candidate_joint.find("axis").get("xyz")
+        )
+
+        if any(
+            abs(candidate_axis[index] + source_axis[index]) > 1e-12
+            for index in range(3)
+        ):
+            raise ContractError("LEARNED_ROBOT_MODEL_TRIAL_DELTA")
+
+        for candidate_q, source_q in ((0.0, upper), (upper, 0.0)):
+            source_position = tuple(
+                source_origin[index] + source_axis[index] * source_q
+                for index in range(3)
+            )
+            candidate_position = tuple(
+                candidate_origin[index] + candidate_axis[index] * candidate_q
+                for index in range(3)
+            )
+            if any(
+                abs(a - b) > 1e-12
+                for a, b in zip(source_position, candidate_position)
+            ):
+                raise ContractError("LEARNED_ROBOT_MODEL_TRIAL_DELTA")
+
+    return changed
+
+
+def validate_robot_model_trial(
+    value, source, candidate_robot_description,
+):
+    fields = {
+        "schema_version",
+        "scope",
+        "source_robot_description",
+        "source_robot_description_digest",
+        "candidate_robot_description_digest",
+        "changed_joint_fields",
+        "execution_authorized",
+        "trial_digest",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ContractError("LEARNED_ROBOT_MODEL_TRIAL_SCHEMA")
+
+    trial = copy.deepcopy(value)
+
+    if (
+        trial["schema_version"] != ROBOT_MODEL_TRIAL_SCHEMA
+        or trial["scope"] != "TEST_ONLY_PLAN_ONLY"
+        or trial["execution_authorized"] is not False
+        or trial["trial_digest"]
+        != canonical_digest({
+            key: item
+            for key, item in trial.items()
+            if key != "trial_digest"
+        })
+    ):
+        raise ContractError("LEARNED_ROBOT_MODEL_TRIAL_SCHEMA")
+
+    source_xml = trial["source_robot_description"]
+    source_digest = _robot_description_digest(source_xml)
+    candidate_digest = _robot_description_digest(
+        candidate_robot_description
+    )
+
+    try:
+        bound_source_digest = source[
+            "binding_digests"
+        ]["robot_description_digest"]
+    except (KeyError, TypeError) as exc:
+        raise ContractError(
+            "LEARNED_ROBOT_MODEL_TRIAL_BINDING"
+        ) from exc
+
+    if (
+        trial["source_robot_description_digest"] != source_digest
+        or source_digest != bound_source_digest
+        or trial["candidate_robot_description_digest"]
+        != candidate_digest
+        or candidate_digest == source_digest
+    ):
+        raise ContractError("LEARNED_ROBOT_MODEL_TRIAL_BINDING")
+
+    changed = _trial_coordinate_delta(
+        source_xml,
+        candidate_robot_description,
+    )
+    if trial["changed_joint_fields"] != changed:
+        raise ContractError("LEARNED_ROBOT_MODEL_TRIAL_DELTA")
+
+    return trial
+
+
+def build_robot_model_trial(
+    source,
+    source_robot_description,
+    candidate_robot_description,
+):
+    source_digest = _robot_description_digest(
+        source_robot_description
+    )
+    candidate_digest = _robot_description_digest(
+        candidate_robot_description
+    )
+
+    try:
+        bound_source_digest = source[
+            "binding_digests"
+        ]["robot_description_digest"]
+    except (KeyError, TypeError) as exc:
+        raise ContractError(
+            "LEARNED_ROBOT_MODEL_TRIAL_BINDING"
+        ) from exc
+
+    if (
+        source_digest != bound_source_digest
+        or candidate_digest == source_digest
+    ):
+        raise ContractError("LEARNED_ROBOT_MODEL_TRIAL_BINDING")
+
+    trial = {
+        "schema_version": ROBOT_MODEL_TRIAL_SCHEMA,
+        "scope": "TEST_ONLY_PLAN_ONLY",
+        "source_robot_description": source_robot_description,
+        "source_robot_description_digest": source_digest,
+        "candidate_robot_description_digest": candidate_digest,
+        "changed_joint_fields": _trial_coordinate_delta(
+            source_robot_description,
+            candidate_robot_description,
+        ),
+        "execution_authorized": False,
+    }
+    trial["trial_digest"] = canonical_digest(trial)
+
+    return validate_robot_model_trial(
+        trial,
+        source,
+        candidate_robot_description,
+    )
+
+
+def _materialize(
+    source,
+    proposal,
+    boundary="LEARNED_CHUNK_COMPLETE",
+    *,
+    robot_model_trial=None,
+):
+    # Existing source qualification is retained verbatim as context, not
+    # relabeled as evidence of learned effectiveness or physical qualification.
+    arm = next(
+        step for step in source["steps"]
+        if step["phase"] == "SAFE_POSE_PTP"
+    )
+    learned = {
+        "phase": "LEARNED_CHUNK",
+        "limits": copy.deepcopy(arm["limits"]),
+        "requires_confirmation": "PRECONTACT_HUMAN",
+        "pause_after": boundary,
+    }
+    if proposal["schema_version"] in {
+        HELD_PROPOSAL_SCHEMA,
+        REFERENCE_PROPOSAL_SCHEMA,
+    }:
+        learned["held_target_segments"] = held_target_segments(
+            source, proposal
+        )
+
+    result = {
+        **copy.deepcopy(source),
+        "schema_version": PROGRAM_SCHEMA,
+        "source_program": copy.deepcopy(source),
+        "learned_proposal": copy.deepcopy(proposal),
+        "steps": [learned],
+    }
+    if robot_model_trial is not None:
+        result["robot_model_trial"] = copy.deepcopy(robot_model_trial)
+    return result
 
 
 def validate_learned_program(value):
     from tools.fr5_data_factory import validate_motion_program
-    if not isinstance(value, dict) or value.get("schema_version") != PROGRAM_SCHEMA:
+
+    if (
+        not isinstance(value, dict)
+        or value.get("schema_version") != PROGRAM_SCHEMA
+    ):
         raise ContractError("LEARNED_PROGRAM_SCHEMA")
+
     source = value.get("source_program")
-    if not isinstance(source, dict) or source.get("schema_version") != "fr5.motion_program.v2":
+    if (
+        not isinstance(source, dict)
+        or source.get("schema_version") != "fr5.motion_program.v2"
+    ):
         raise ContractError("LEARNED_SOURCE_PROGRAM")
+
     source = validate_motion_program(copy.deepcopy(source))
-    p = validate_proposal(value.get("learned_proposal"))
-    description_digest = "sha256:" + hashlib.sha256(p["robot_description"].encode()).hexdigest()
-    if description_digest != source["binding_digests"]["robot_description_digest"]:
-        raise ContractError("LEARNED_ROBOT_BINDING")
-    if p["velocity_scaling"] > min(step["limits"]["velocity_scaling"] for step in source["steps"] if "velocity_scaling" in step["limits"]):
+    proposal = validate_proposal(value.get("learned_proposal"))
+
+    description_digest = _robot_description_digest(
+        proposal["robot_description"]
+    )
+    source_digest = source[
+        "binding_digests"
+    ]["robot_description_digest"]
+
+    trial_value = value.get("robot_model_trial")
+    trial = None
+
+    if trial_value is None:
+        if description_digest != source_digest:
+            raise ContractError("LEARNED_ROBOT_BINDING")
+    else:
+        trial = validate_robot_model_trial(
+            trial_value,
+            source,
+            proposal["robot_description"],
+        )
+        if (
+            description_digest
+            != trial["candidate_robot_description_digest"]
+        ):
+            raise ContractError(
+                "LEARNED_ROBOT_MODEL_TRIAL_BINDING"
+            )
+
+    if proposal["velocity_scaling"] > min(
+        step["limits"]["velocity_scaling"]
+        for step in source["steps"]
+        if "velocity_scaling" in step["limits"]
+    ):
         raise ContractError("LEARNED_LIMITS")
+
     # Preserve old frozen programs verbatim; new programs distinguish a chunk
     # boundary from the task verdict and recorder freeze.
     steps = value.get("steps")
-    boundary = steps[0].get("pause_after") if isinstance(steps, list) and len(steps) == 1 and isinstance(steps[0], dict) else None
-    if boundary not in {"SEMANTIC_VERDICT", "LEARNED_CHUNK_COMPLETE"}:
+    boundary = (
+        steps[0].get("pause_after")
+        if (
+            isinstance(steps, list)
+            and len(steps) == 1
+            and isinstance(steps[0], dict)
+        )
+        else None
+    )
+    if boundary not in {
+        "SEMANTIC_VERDICT",
+        "LEARNED_CHUNK_COMPLETE",
+    }:
         raise ContractError("LEARNED_PROGRAM_BINDING")
-    expected = _materialize(source, p, boundary)
+
+    expected = _materialize(
+        source,
+        proposal,
+        boundary,
+        robot_model_trial=trial,
+    )
     if value != expected:
         raise ContractError("LEARNED_PROGRAM_BINDING")
     return expected
 
 
-def compile_program(source, proposal):
-    return validate_learned_program(_materialize(source, proposal))
+def compile_program(source, proposal, *, robot_model_trial=None):
+    return validate_learned_program(
+        _materialize(
+            source,
+            proposal,
+            robot_model_trial=robot_model_trial,
+        )
+    )
 
 
 class FinitePolicyInference:

@@ -247,6 +247,75 @@ class FinitePlanTest(unittest.TestCase):
                 "plan_digest": canonical_digest(plan), "scene_binding": copy.deepcopy(plan["scene_binding"]),
                 "deadline_s": deadline_s, "checked_segments": [], "close": None}
 
+    def test_robot_model_trial_scope_is_plan_only(self):
+        from tools.data_factory import run_job
+
+        plan_only = {
+            "mode": "plan_only",
+            "learned_checkpoint": "/tmp/checkpoint",
+            "gripper_temporal_policy": "/tmp/policy.json",
+            "learned_robot_model_trial_urdf": "/tmp/candidate.urdf",
+        }
+        options = run_job._learned_options(plan_only)
+        self.assertEqual(
+            options["robot_model_trial_urdf"],
+            "/tmp/candidate.urdf",
+        )
+
+        with self.assertRaisesRegex(
+            ContractError,
+            "LEARNED_ROBOT_MODEL_TRIAL_SCOPE",
+        ):
+            run_job._learned_options({
+                **plan_only,
+                "mode": "live",
+            })
+
+    def test_robot_model_trial_execution_is_blocked_before_transport(self):
+        transport = Transport()
+        executor = PickupExecutor(
+            transport=transport,
+            execution_enabled=True,
+            clock=lambda: datetime(
+                2026, 9, 11, tzinfo=timezone.utc
+            ),
+        )
+        digest = canonical_digest(
+            "robot-model-trial-plan"
+        )
+        executor.runs["run"] = {
+            "state": "APPROVED",
+            "digest": digest,
+            "precommit_safety": {
+                "status": "PENDING",
+            },
+            "approval": {
+                "approval_expiry":
+                    "2099-01-01T00:00:00Z",
+                "approval_scope": "HUMAN_GATED",
+            },
+            "plan": {
+                "robot_model_trial": {
+                    "schema_version":
+                        "data_factory.robot_model_trial.v1",
+                },
+            },
+        }
+
+        response = executor._execute({
+            "run_id": "run",
+            "plan_digest": digest,
+            "lease_id": "trial-lease",
+        })
+
+        self.assertFalse(response["ok"])
+        self.assertEqual(
+            response["code"],
+            "ROBOT_MODEL_TRIAL_EXECUTION_BLOCKED",
+        )
+        self.assertEqual(response["state"], "APPROVED")
+        self.assertEqual(transport.sent, [])
+
     def test_recorded4032_raw_output_retains_all_rows_and_rejects_limits(self):
         recorded = json.loads(Path(__file__).with_name("recorded4032.json").read_text())
         self.assertEqual(recorded["source_report_sha256"],
