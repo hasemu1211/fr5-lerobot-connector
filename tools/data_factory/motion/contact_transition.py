@@ -131,7 +131,7 @@ def before(transport, plan, step, observation, context):
         check_transition(prior[-1]["terminal_observation"], observation, command=False)
     source = plan["learned_source_program"]
     snapshot = observation["snapshot"]
-    if snapshot["gripper_controller"]["hardware_execution"]["wire"]["version"] != 4:
+    if snapshot["gripper_controller"]["hardware_execution"]["wire"]["version"] not in (4, 5):
         raise ContractError("CONTACT_NATIVE_SELECTED_TUPLE_UNAVAILABLE")
     command = step["type"] == "GRIPPER"
     target = step["gripper_position_m"]

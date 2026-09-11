@@ -21,14 +21,30 @@ namespace rclcpp {struct Time {};struct Duration {};}
 namespace hardware_interface {enum class return_type {OK, ERROR};}
 namespace fairino_hardware {
 std::atomic<int> udp_command_error{0};
+// The optional candidate-SDK fixture supplies these exact public types.
+#ifndef FR5_SNAPSHOT_SDK_TEST
 struct JointPos {double jPos[6]{};};
 struct ExaxisPos {double values[4];};
 struct ROBOT_STATE_PKG {
   struct {int year=1970,mouth=1,day=1,hour=0,minute=0,second=10,millisecond=0;} robotTime;
   uint8_t frame_cnt=1,gripper_position=100,gripper_motiondone=0;
-  int gripper_fault=0;
+  int gripper_fault=0,main_code=0,sub_code=0;
+  double jt_cur_pos[6]{};
 };
+struct RobotStateSnapshot {
+  ROBOT_STATE_PKG state{}; int64_t host_receive_steady_ns=0;
+  uint64_t producer_sequence=0, connection_epoch=0, configuration_epoch=0; bool valid=false;
+};
+constexpr int ROBOT_SNAPSHOT_OK=0;
+#endif
 struct Robot {
+  int GetRobotRealTimeStateSnapshot(RobotStateSnapshot *p) {
+#ifdef FR5_SNAPSHOT_SDK_TEST
+    return injected_snapshot(p);
+#else
+    (void)p; return -1;
+#endif
+  }
   int moves=0,resumes=0,target=100,polls=0,move_error=0,resume_error=0,arm_sends=0;
   JointPos last_arm;
   bool sampler_only=false;
@@ -43,8 +59,8 @@ struct Robot {
     const auto ms=std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::system_clock::now().time_since_epoch()).count()-3;
     std::time_t seconds=ms/1000;std::tm calendar{};gmtime_r(&seconds,&calendar);
-    state.robotTime={calendar.tm_year+1900,calendar.tm_mon+1,calendar.tm_mday,
-      calendar.tm_hour,calendar.tm_min,calendar.tm_sec,int(ms%1000)};
+    state.robotTime.year=calendar.tm_year+1900;state.robotTime.mouth=calendar.tm_mon+1;state.robotTime.day=calendar.tm_mday;
+    state.robotTime.hour=calendar.tm_hour;state.robotTime.minute=calendar.tm_min;state.robotTime.second=calendar.tm_sec;state.robotTime.millisecond=int(ms%1000);
   }
   int GetRobotRealTimeState(ROBOT_STATE_PKG *p) {
     if(sampler_only) assert(std::this_thread::get_id()==sampler_thread);
@@ -111,6 +127,11 @@ struct FairinoHardwareInterface {
   std::unique_ptr<Robot> _ptr_robot=std::make_unique<Robot>();
   GripperExecutionEvidence _gripper_evidence;
   bool _require_gripper_source_clock=false;
+  bool _require_coherent_snapshot=false;
+  CoherentDelivery _delivery;
+  std::array<double,2> _completion_epochs{};
+  void sample_coherent_evidence();
+  std::vector<double> _jnt_position_state=std::vector<double>(7,0.);
   bool _has_arm=true,_is_gripper=true;
   int _control_mode=0;
   std::array<size_t,6> _arm_joint_indices{0,1,2,3,4,5};

@@ -640,7 +640,7 @@ class PickupExecutor:
                         if abs(proposal["actions"][0][-1] - gripper["reference_position_m"]) > rate * proposal["reference_timing"]["durations_s"][0] + 1e-9:
                             raise ContractError("LEARNED_VELOCITY_LIMIT")
                         segment["gripper_position_m"] = gripper["reference_position_m"]
-                        if proposal.get("runtime_inputs", {}).get("hardware_wire_version") == 4:
+                        if proposal.get("runtime_inputs", {}).get("hardware_wire_version") in (4, 5):
                             from tools.data_factory.rollout.finite_plan import native_close_feedback
                             segment.pop("native_close_feedback", None)
                             segment.update(native_close_feedback(motion_program["source_program"], gripper["reference_position_m"]))

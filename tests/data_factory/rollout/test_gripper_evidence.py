@@ -56,7 +56,7 @@ class NativeGripperEvidenceTest(unittest.TestCase):
         header = patched_source("fairino_hardware_v3_9_7/include/fairino_hardware/gripper_execution_evidence.hpp")
         (path / "gripper_execution_evidence.hpp").write_text(header)
         source = patched_source("fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp")
-        native = (method(source, "certified_gripper_observation") + method(source, "refresh_gripper_freshness") + method(source, "gripper_worker") + method(source, "sample_gripper_evidence")
+        native = (method(source, "certified_gripper_observation") + method(source, "refresh_gripper_freshness") + method(source, "gripper_worker") + method(source, "sample_gripper_evidence") + method(source, "sample_coherent_evidence")
                   + method(source, "gripper_release_ready") + method(source, "write") + method(source, "stop_gripper_worker"))
         fixture = Path(__file__).with_name("gripper_native_fixture.cpp").read_text()
         (path / "native.cpp").write_text(fixture.replace("// NATIVE_METHODS", native))
@@ -137,7 +137,7 @@ class NativeGripperEvidenceTest(unittest.TestCase):
         fixture = Path(__file__).with_name("gripper_native_fixture.cpp").read_text().split("int main(")[0]
         source = patched_source("fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp")
         native = "\n".join(method(source, name) for name in (
-            "certified_gripper_observation", "refresh_gripper_freshness", "gripper_worker", "sample_gripper_evidence",
+            "certified_gripper_observation", "refresh_gripper_freshness", "gripper_worker", "sample_gripper_evidence", "sample_coherent_evidence",
             "gripper_release_ready", "write", "stop_gripper_worker"))
         main = r'''int main(int argc,char **argv) {
           using namespace fairino_hardware;
@@ -214,3 +214,115 @@ class NativeGripperEvidenceTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CoherentSnapshotTest(unittest.TestCase):
+    """Actual selected SDK publication -> native methods -> ROS/Python consumer.
+
+    The SDK transport constructors and robot command calls are injected. This is
+    software integration evidence; it cannot qualify a controller or a Pick.
+    """
+    @classmethod
+    def setUpClass(cls):
+        import os
+        cls.sdk = Path(os.environ.get("FAIRINO_SNAPSHOT_SDK_ROOT", ""))
+        if not os.environ.get("FAIRINO_SNAPSHOT_SDK_ROOT"):
+            raise unittest.SkipTest("select immutable FAIRINO_SNAPSHOT_SDK_ROOT for candidate integration")
+        cls.temp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.temp.cleanup)
+        path = Path(cls.temp.name)
+        (path / "gripper_execution_evidence.hpp").write_text(patched_source(
+            "fairino_hardware_v3_9_7/include/fairino_hardware/gripper_execution_evidence.hpp"))
+        source = patched_source("fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp")
+        native = "\n".join(method(source, name) for name in (
+            "certified_gripper_observation", "refresh_gripper_freshness", "gripper_worker", "sample_gripper_evidence",
+            "sample_coherent_evidence", "gripper_release_ready", "write", "stop_gripper_worker"))
+        fixture = Path(__file__).with_name("gripper_native_fixture.cpp").read_text().split("int main(")[0]
+        code = Path(__file__).with_name("snapshot_sdk_fixture.cpp").read_text().replace(
+            "// NATIVE_FIXTURE", fixture.replace("// NATIVE_METHODS", native))
+        (path / "snapshot.cpp").write_text(code)
+        includes = cls.sdk / "libfairino/src/include"
+        library = cls.sdk / "libfairino/LinuxBuild/bin"
+        cls.binary = path / "snapshot"
+        result = subprocess.run(["g++", "-std=c++17", "-pthread", *[f"-I{includes / d}" for d in
+            ("Robot-EN", "CNDE", "ComClient", "Base", "Log", "XmlRpc")], str(path / "snapshot.cpp"),
+            f"-L{library}", "-lfairino", "-o", str(cls.binary)], capture_output=True, text=True)
+        if result.returncode:
+            raise AssertionError(result.stderr)
+        cls.env = {**os.environ, "LD_LIBRARY_PATH": str(library) + ":" + os.environ.get("LD_LIBRARY_PATH", "")}
+        binding = subprocess.check_output(["ldd", str(cls.binary)], env=cls.env, text=True)
+        if str(library / "libfairino.so.2") not in binding:
+            raise AssertionError("wrong SDK binding: " + binding)
+        print("candidate SDK binding:", next(line.strip() for line in binding.splitlines() if "libfairino.so" in line), flush=True)
+
+    def packet(self, mode):
+        result = subprocess.run([str(self.binary), mode], capture_output=True, text=True, timeout=3, env=self.env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout[result.stdout.rfind('{'):])
+
+    def evidence(self, packet):
+        from control_msgs.msg import DynamicJointState, InterfaceValue
+        from rclpy.serialization import serialize_message, deserialize_message
+        from tools.data_factory.rollout.gripper_evidence import SNAPSHOT_FIELDS
+        self.assertEqual(tuple(packet["names"]), SNAPSHOT_FIELDS)
+        wire = dict(zip(packet["names"], packet["wire"]))
+        policy = {"schema_version": "fr5.gripper_temporal_policy.v2", "incarnation": [1, 2, 3, 4],
+                  "connection_epoch": 1, "configuration_epoch": 0, "max_age_s": .08, "host_clock_tolerance_s": .002}
+        msg = DynamicJointState(joint_names=[RESOURCE], interface_values=[InterfaceValue(
+            interface_names=packet["names"], values=packet["wire"])])
+        msg = deserialize_message(serialize_message(msg), DynamicJointState)
+        # Deterministic consumer clock just after the original SDK receipt.
+        steady = wire["sample_steady_s"] + .0001
+        now = wire["sample_system_s"] + .0001
+        hw = decode_dynamic_state(msg, policy, steady)
+        evidence = {"captured_at_s": now, "captured_monotonic_s": steady, "snapshot": {
+            "joint_positions": [wire[f"arm_j{i}_rad"] for i in range(1, 7)],
+            "gripper_controller": {"feedback_position_m": wire["feedback_m"], "hardware_execution": hw}}}
+        return evidence, now, steady
+
+    def test_actual_sdk_native_normal_and_historical_completion_reach_python(self):
+        from tools.data_factory.motion.moveit_transport import RosMoveItTransport
+        for mode in ("normal", "complete"):
+            with self.subTest(mode=mode):
+                packet = self.packet(mode)
+                self.assertEqual(packet["arm_sends"], 1)
+                if mode == "normal":
+                    self.assertEqual(packet["queries"], 0)
+                evidence, now, steady = self.evidence(packet)
+                hw = evidence["snapshot"]["gripper_controller"]["hardware_execution"]
+                wire = check_hardware(evidence, now, steady, .08, completion=mode == "complete")
+                self.assertEqual(wire["current_valid"], 0)
+                transport = object.__new__(RosMoveItTransport)
+                transport._gripper_source_clock = hw["clock_binding"]
+                transport._clock = lambda: steady
+                transport._gripper_hardware_evidence = lambda: hw
+                self.assertTrue(transport._native_current_ready(.08))
+                with mock.patch.dict(wire, {"sample_steady_s": steady-.2, "host_receive_steady_s": steady-.2}):
+                    self.assertFalse(transport._native_current_ready(.08))
+                    with self.assertRaises(ContractError):
+                        check_hardware(evidence, now, steady, .08)
+                if mode == "complete":
+                    with mock.patch.dict(wire, {"terminal_query_before_steady_s": wire["ack_steady_s"]-.01}):
+                        with self.assertRaises(ContractError):
+                            check_hardware(evidence, now, steady, .08)
+
+    def test_native_delivery_and_command_falsifiers_have_zero_arm_sends(self):
+        for mode in ("busy", "stale", "repeat_source", "reconnect", "configuration", "regression", "device_error", "cancel", "old_completion", "deadline", "cancel_query"):
+            with self.subTest(mode=mode):
+                self.assertEqual(self.packet(mode)["arm_sends"], 0)
+
+    def test_python_rejects_mixed_frame_epoch_and_fake_source_progress(self):
+        import copy
+        from tools.data_factory.rollout.gripper_evidence import check_transition
+        evidence, now, steady = self.evidence(self.packet("normal"))
+        for key, value in (("connection_epoch", 2), ("configuration_epoch", 1), ("device_main_error", 1), ("arm_j1_rad", 99)):
+            changed = copy.deepcopy(evidence)
+            changed["snapshot"]["gripper_controller"]["hardware_execution"]["wire"][key] = value
+            with self.subTest(key=key), self.assertRaises(ContractError):
+                check_hardware(changed, now, steady, .08)
+        changed = copy.deepcopy(evidence)
+        w = changed["snapshot"]["gripper_controller"]["hardware_execution"]["wire"]
+        w["producer_sequence"] += 1
+        w["source_progress_steady_s"] += .00001
+        with self.assertRaises(ContractError):
+            check_transition(evidence, changed, command=False)

@@ -175,9 +175,9 @@ int main(int argc, char **argv) {
     if(mode!="fresh") assert(r.arm_sends==sends);
   }
   std::cout<<std::setprecision(17)<<"{\"wire\":[";
-  for(size_t i=0;i<good.size();++i){if(i)std::cout<<",";std::cout<<good[i];}
+  for(size_t i=0;i<106;++i){if(i)std::cout<<",";std::cout<<good[i];}
   std::cout<<"],\"names\":[";
-  for(size_t i=0;i<GripperExecutionEvidence::names.size();++i){if(i)std::cout<<",";std::cout<<"\""<<GripperExecutionEvidence::names[i]<<"\"";}
+  for(size_t i=0;i<106;++i){if(i)std::cout<<",";std::cout<<"\""<<GripperExecutionEvidence::names[i]<<"\"";}
   std::cout<<"],\"sdk_tuple\":[";
   for(size_t i=0;i<r.sdk_tuple.size();++i){if(i)std::cout<<",";std::cout<<r.sdk_tuple[i];}
   std::cout<<"],\"proof_unchanged\":true,\"renewed_arm_sends\":"<<r.arm_sends-before<<"}\n";

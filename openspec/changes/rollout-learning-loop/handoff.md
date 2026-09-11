@@ -36,12 +36,23 @@ old installed SDK through inherited LD_LIBRARY_PATH and failed with the new
 symbol missing. The reproducible test now pins and verifies its candidate loader
 path. No SDK was installed and no robot connection was attempted.
 
-The same Rollout owner now implements the actual native/Python consumer in
-`.agent-local/work/controller-clock-probe/native-successor-6682-HzKknp`, an exact
-main `6682f27` export, leaving its historical worktree intact. Route
-`7fe13b67ddb3223d89f654f311b899b48fe69468ccbfebc1081d6162a7a23d09`
-binds this CPU-only continuation. Root owns independent integration, full
-regression and physical effects. The native successor is not yet qualified.
+The coherent-delivery successor has now been recovered and integrated into
+main source form for CPU qualification. Canonical `patches/frcobot_ros2.patch`
+SHA-256 is
+`647fd7704a46445235ffed49d4406019a78eb3abb0903558336aa679d3fa094b`.
+Hardware wire v5 is bound specifically to
+`fr5.gripper_temporal_policy.v2`; versions 3/4 retain temporal-policy v1 and
+version 2 retains the legacy source-clock contract.
+
+Independent main-tree replay passed the external SDK seven-case producer/getter
+test, 31 focused native/transport tests (one environment-dependent skip), and
+71 learned plan/protocol tests. A pristine vendor `60755d44` export accepted the
+canonical patch, `fairino_hardware` configured and built successfully, and
+`ldd -r` resolved `libfairino.so.2` to the selected coherent SDK candidate with
+no unresolved dynamic symbols. This is CPU/software integration qualification
+only: no SDK install, ROS deployment, robot connection, learned Pick or physical
+continuity qualification is claimed. Preserve the existing dirty
+`src/frcobot_ros2` working tree; it was not used as the integration target.
 
 The selected 4032 policy-only tree was rehashed unchanged as
 `sha256:aa5ca010131f5bd00c605ab0b9017f27f2c3906c8017502a1ba1915916b8f4e7`.

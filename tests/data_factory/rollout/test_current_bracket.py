@@ -38,7 +38,7 @@ class CurrentBracketTest(unittest.TestCase):
             "fairino_hardware_v3_9_7/include/fairino_hardware/gripper_execution_evidence.hpp"))
         source = patched_source("fairino_hardware_v3_9_7/src/fairino_hardware_interface.cpp")
         native = "\n".join(method(source, name) for name in (
-            "certified_gripper_observation", "refresh_gripper_freshness", "gripper_worker", "sample_gripper_evidence",
+            "certified_gripper_observation", "refresh_gripper_freshness", "gripper_worker", "sample_gripper_evidence", "sample_coherent_evidence",
             "gripper_release_ready", "write", "stop_gripper_worker"))
         fixture = Path(__file__).with_name("gripper_native_fixture.cpp").read_text().split("int main(")[0]
         code = fixture.replace("// NATIVE_METHODS", native) + Path(__file__).with_name("bracket_native_main.cpp").read_text()
@@ -336,6 +336,10 @@ class VendorPatchBuildTest(unittest.TestCase):
             package = root / "fairino_hardware_v3_9_7"
             vendor_package = vendor / "fairino_hardware_v3_9_7"
             includes = [package / "include", vendor_package / "include", vendor_package / "include/fairino_hardware", vendor_package, Path("/usr/include/eigen3")]
+            import os
+            sdk_include = Path(os.environ.get("FAIRINO_SNAPSHOT_SDK_INCLUDE", vendor_package / "libfairino/include"))
+            self.assertTrue((sdk_include / "robot_state_snapshot.h").exists(), "select candidate FAIRINO_SNAPSHOT_SDK_INCLUDE")
+            includes.insert(0, sdk_include)
             includes.extend(p for p in Path("/opt/ros/jazzy/include").iterdir() if p.is_dir())
             result = subprocess.run(["g++", "-std=c++17", "-fsyntax-only", *[f"-I{p}" for p in includes],
                                      str(package / "src/fairino_hardware_interface.cpp")], capture_output=True, text=True)

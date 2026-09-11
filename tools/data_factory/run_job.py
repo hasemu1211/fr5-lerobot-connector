@@ -2471,7 +2471,7 @@ def _native_run_inputs(payload, profile, cancel, *, instruction):
         validator = validate_temporal_policy
     binding = validator(load_json_strict(Path(options[key])))
     inputs = {**options, "clock_binding": binding, "camera_topics": topics,
-              "camera_mapping": mapping, "fps": profile["fps"], "warmup": warmup, "hardware_wire_version": 4 if causal else 2}
+              "camera_mapping": mapping, "fps": profile["fps"], "warmup": warmup, "hardware_wire_version": (5 if binding["schema_version"] == "fr5.gripper_temporal_policy.v2" else 4) if causal else 2}
     return native, inputs
 
 

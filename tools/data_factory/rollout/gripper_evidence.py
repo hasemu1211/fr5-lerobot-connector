@@ -49,6 +49,14 @@ SELECTED_FIELDS = CAUSAL_FIELDS + (
 )
 
 
+# v5 separates coherent delivery from the original same-command terminal proof.
+SNAPSHOT_FIELDS = SELECTED_FIELDS + (
+    "host_receive_steady_s", "producer_sequence", "connection_epoch", "configuration_epoch", "source_progress_steady_s",
+    "arm_j1_rad", "arm_j2_rad", "arm_j3_rad", "arm_j4_rad", "arm_j5_rad", "arm_j6_rad",
+    "device_main_error", "device_sub_error", "terminal_connection_epoch", "terminal_configuration_epoch",
+)
+
+
 def native_selected_command(wire, required, upper, *, qualified_close=False):
     """Compare an acknowledged SDK selection, not two raw policy coordinates.
 
@@ -56,7 +64,7 @@ def native_selected_command(wire, required, upper, *, qualified_close=False):
     alternate installations cannot inherit this equivalence. Fixed arguments
     are the existing MoveGripper call, not new controller settings.
     """
-    if wire.get("version") != 4 or wire.get("selected_valid") != 1:
+    if wire.get("version") not in (4, 5) or wire.get("selected_valid") != 1:
         raise ContractError("CONTACT_NATIVE_SELECTED_TUPLE_UNAVAILABLE")
     target = wire["raw_reference_m"]
     if not 0 <= target <= upper or wire["selected_upper_m"] != upper:
@@ -88,7 +96,14 @@ def native_close_equivalence(wire, required, upper):
 def validate_temporal_policy(policy):
     """Live owner-selected bounds, not a calendar-offset estimate or approval."""
     try:
-        if set(policy) != {"schema_version", "incarnation", "max_age_s", "host_clock_tolerance_s"} or policy["schema_version"] != "fr5.gripper_temporal_policy.v1":
+        successor = policy.get("schema_version") == "fr5.gripper_temporal_policy.v2"
+        keys = {"schema_version", "incarnation", "max_age_s", "host_clock_tolerance_s"}
+        if successor:
+            keys |= {"connection_epoch", "configuration_epoch"}
+            for key in ("connection_epoch", "configuration_epoch"):
+                if integer(policy[key], 2**53-1) == 0 and key == "connection_epoch":
+                    raise ValueError()
+        if set(policy) != keys or policy["schema_version"] not in ("fr5.gripper_temporal_policy.v1", "fr5.gripper_temporal_policy.v2"):
             raise ValueError()
         ids = policy["incarnation"]
         if not isinstance(ids, list) or len(ids) != 4 or not any(ids):
@@ -105,11 +120,13 @@ def validate_temporal_policy(policy):
 def native_temporal_parameter(policy):
     """Atomic gripper_temporal_policy_v1 double-array; explicitly configured by LIVE owner."""
     policy = validate_temporal_policy(policy)
-    return [1., *map(float, policy["incarnation"]), float(policy["max_age_s"]), float(policy["host_clock_tolerance_s"])]
+    successor = policy["schema_version"] == "fr5.gripper_temporal_policy.v2"
+    return [2. if successor else 1., *map(float, policy["incarnation"]), float(policy["max_age_s"]), float(policy["host_clock_tolerance_s"]),
+            *([float(policy["connection_epoch"]), float(policy["configuration_epoch"])] if successor else [])]
 
 
 def validate_evidence_binding(binding):
-    if isinstance(binding, dict) and binding.get("schema_version") == "fr5.gripper_temporal_policy.v1":
+    if isinstance(binding, dict) and binding.get("schema_version") in ("fr5.gripper_temporal_policy.v1", "fr5.gripper_temporal_policy.v2"):
         return validate_temporal_policy(binding)
     return validate_clock_binding(binding)
 
@@ -179,7 +196,7 @@ def decode_dynamic_state(message, binding, received_steady_s):
             raise ValueError()
         values = message.interface_values[names.index(RESOURCE)]
         fields = list(values.interface_names)
-        if len(fields) != len(set(fields)) or set(fields) not in (set(FIELDS), set(LIVE_FIELDS), set(CAUSAL_FIELDS), set(SELECTED_FIELDS)) or len(fields) != len(values.values):
+        if len(fields) != len(set(fields)) or set(fields) not in (set(FIELDS), set(LIVE_FIELDS), set(CAUSAL_FIELDS), set(SELECTED_FIELDS), set(SNAPSHOT_FIELDS)) or len(fields) != len(values.values):
             raise ValueError()
         wire = dict(zip(fields, values.values))
         for value in wire.values():
@@ -201,6 +218,37 @@ def calendar_s(wire, prefix=""):
                                  tzinfo=datetime.timezone.utc).timestamp()
     except (KeyError, TypeError, ValueError, OverflowError) as exc:
         raise ContractError("LEARNED_HARDWARE_SOURCE_CLOCK") from exc
+
+
+def check_delivery(wire, policy, steady_now, max_age_s):
+    """One SDK publication, original host receipt; no acquisition-age guarantee.
+
+    Connection/config identity is frozen before approval. Native source progress
+    uses the original receipt of the last strictly newer source stamp, never the
+    getter or DDS delivery time. The age bound is supplied by the existing owner.
+    """
+    policy = validate_temporal_policy(policy)
+    if (wire["version"] != 5 or policy["schema_version"] != "fr5.gripper_temporal_policy.v2"
+            or wire["current_max_age_s"] != policy["max_age_s"] or policy["max_age_s"] != max_age_s
+            or wire["host_clock_tolerance_s"] != policy["host_clock_tolerance_s"]):
+        raise ContractError("LEARNED_HARDWARE_TEMPORAL_POLICY")
+    for key in ("producer_sequence", "connection_epoch", "configuration_epoch"):
+        if integer(wire[key], 2**53-1) == 0 and key != "configuration_epoch":
+            raise ContractError("LEARNED_HARDWARE_INVALID")
+    if any(wire[key] != policy[key] for key in ("connection_epoch", "configuration_epoch")):
+        raise ContractError("LEARNED_HARDWARE_INCARNATION")
+    if wire["valid"] != 1 or wire["stopped"] or wire["error"] or any(wire[k] for k in ("device_main_error", "device_sub_error", "sample_fault")):
+        raise ContractError("LEARNED_HARDWARE_INVALID")
+    receipt, progress = number(wire["host_receive_steady_s"]), number(wire["source_progress_steady_s"])
+    if (receipt != wire["sample_steady_s"] or not 0 < progress <= receipt <= steady_now
+            or steady_now-progress > max_age_s or steady_now-receipt > max_age_s):
+        raise ContractError("LEARNED_HARDWARE_STALE")
+    calendar_s(wire)
+    for i in range(1, 7):
+        number(wire[f"arm_j{i}_rad"])
+    # Optional alignment is absent, not silently synthesized from receipt.
+    if any(wire[key] for key in ("current_valid", *CURRENT_FIELDS[1:7], *CURRENT_FIELDS[22:31])):
+        raise ContractError("LEARNED_HARDWARE_SCHEMA")
 
 
 def check_current_bracket(wire, now, steady_now, max_age_s):
@@ -257,11 +305,11 @@ def check_hardware(evidence, now, steady_now, max_age_s, *, completion=False, al
         if not isinstance(hw, dict) or set(hw) != {"wire", "clock_binding", "received_steady_s"}:
             raise ValueError()
         wire = hw["wire"]
-        if not isinstance(wire, dict) or set(wire) != set(SELECTED_FIELDS if wire.get("version") == 4 else CAUSAL_FIELDS if wire.get("version") == 3 else LIVE_FIELDS if wire.get("version") == 2 else FIELDS):
+        if not isinstance(wire, dict) or set(wire) != set(SNAPSHOT_FIELDS if wire.get("version") == 5 else SELECTED_FIELDS if wire.get("version") == 4 else CAUSAL_FIELDS if wire.get("version") == 3 else LIVE_FIELDS if wire.get("version") == 2 else FIELDS):
             raise ValueError()
         for value in wire.values():
             number(value)
-        mapping = (validate_temporal_policy if wire.get("version") in (3, 4) else validate_clock_binding)(hw["clock_binding"])
+        mapping = (validate_temporal_policy if wire.get("version") in (3, 4, 5) else validate_clock_binding)(hw["clock_binding"])
         if not any(identity(wire)) or identity(wire) != mapping["incarnation"]:
             raise ContractError("LEARNED_HARDWARE_INCARNATION")
         for key in ("generation", "active_generation", "completed_generation"):
@@ -270,7 +318,7 @@ def check_hardware(evidence, now, steady_now, max_age_s, *, completion=False, al
         integer(wire["completion_reason"], 2)
         for key in ("pending", "rpc_active", "arm_resumed", "stopped", "valid"):
             integer(wire[key], 1)
-        if wire["version"] not in (1, 2, 3, 4) or wire["valid"] != 1:
+        if wire["version"] not in (1, 2, 3, 4, 5) or wire["valid"] != 1:
             raise ContractError("LEARNED_HARDWARE_INVALID")
         if wire["stopped"] or wire["error"]:
             raise ContractError("LEARNED_HARDWARE_UNRESOLVED")
@@ -284,7 +332,13 @@ def check_hardware(evidence, now, steady_now, max_age_s, *, completion=False, al
             raise ContractError("LEARNED_HARDWARE_UNRESOLVED")
         now, steady_now = number(now), number(steady_now)
         uncertainty = mapping.get("uncertainty_s", mapping.get("host_clock_tolerance_s"))
-        if wire["version"] >= 2:
+        if wire["version"] == 5:
+            check_delivery(wire, mapping, steady_now, max_age_s)
+            observed = evidence["snapshot"]
+            if (observed["joint_positions"] != [wire[f"arm_j{i}_rad"] for i in range(1, 7)]
+                    or observed["gripper_controller"]["feedback_position_m"] != wire["feedback_m"]):
+                raise ContractError("LEARNED_HARDWARE_SAMPLE_BINDING")
+        elif wire["version"] >= 2:
             check_current_bracket(wire, now, steady_now, max_age_s)
         elif (not mapping["system_anchor_s"] <= now <= mapping["valid_until_system_s"]
                 or abs((now - mapping["system_anchor_s"]) - (steady_now - mapping["steady_anchor_s"])) > uncertainty):
@@ -299,7 +353,7 @@ def check_hardware(evidence, now, steady_now, max_age_s, *, completion=False, al
                 raise ContractError("LEARNED_HARDWARE_STALE")
         if not 0 <= now - wire["sample_system_s"] <= max_age_s:
             raise ContractError("LEARNED_HARDWARE_STALE")
-        if wire["version"] in (3, 4):
+        if wire["version"] in (3, 4, 5):
             if (wire["current_max_age_s"] != mapping["max_age_s"]
                     or wire["host_clock_tolerance_s"] != mapping["host_clock_tolerance_s"]
                     or wire["sample_fault"] != 0):
@@ -323,8 +377,10 @@ def check_hardware(evidence, now, steady_now, max_age_s, *, completion=False, al
         else:
             if wire["completed_generation"] != generation or wire["completion_reason"] not in (1, 2):
                 raise ContractError("LEARNED_HARDWARE_COMPLETION")
-            if wire["version"] in (3, 4):
-                check_causal_command_proof(wire, now, steady_now, max_age_s, completion=completion)
+            if wire["version"] in (3, 4, 5):
+                check_causal_command_proof(wire, now, steady_now, max_age_s, completion=completion and wire["version"] != 5)
+                if wire["version"] == 5 and any(wire["terminal_" + key] != wire[key] for key in ("connection_epoch", "configuration_epoch")):
+                    raise ContractError("LEARNED_HARDWARE_INCARNATION")
                 # Selected-command authority is consumed separately. An absent
                 # tuple must not destroy otherwise valid diagnostic telemetry.
                 return wire
@@ -368,6 +424,13 @@ def check_transition(start, terminal, *, command, allow_queued=False):
     try:
         a = start["snapshot"]["gripper_controller"]["hardware_execution"]["wire"]
         b = terminal["snapshot"]["gripper_controller"]["hardware_execution"]["wire"]
+        if a["version"] == 5 or b["version"] == 5:
+            if (a["version"] != b["version"] or any(a[k] != b[k] for k in ("connection_epoch", "configuration_epoch"))):
+                raise ContractError("LEARNED_HARDWARE_INCARNATION")
+            if (b["producer_sequence"] < a["producer_sequence"] or calendar_s(b) < calendar_s(a)
+                    or b["host_receive_steady_s"] < a["host_receive_steady_s"]
+                    or (calendar_s(b) == calendar_s(a) and b["source_progress_steady_s"] != a["source_progress_steady_s"])):
+                raise ContractError("LEARNED_HARDWARE_STALE")
         if identity(a) != identity(b):
             raise ContractError("LEARNED_HARDWARE_INCARNATION")
         if b["generation"] != a["generation"] + int(command):

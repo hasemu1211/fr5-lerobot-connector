@@ -87,7 +87,7 @@ def validate_proposal(value):
         raise ContractError("LEARNED_PROPOSAL_DIGEST")
     if "runtime_inputs" in p:
         inputs = p["runtime_inputs"]
-        causal = isinstance(inputs, dict) and inputs.get("hardware_wire_version") in (3, 4)
+        causal = isinstance(inputs, dict) and inputs.get("hardware_wire_version") in (3, 4, 5)
         hardware_key = "gripper_temporal_policy" if causal else "gripper_source_clock"
         if (not isinstance(inputs, dict) or set(inputs) - {"warmup", "hardware_wire_version", "reference_mode"} != {"checkpoint", "device", hardware_key, "clock_binding", "camera_topics", "camera_mapping", "fps"}
                 or any(not isinstance(inputs[k], str) or not inputs[k] for k in ("checkpoint", hardware_key))
@@ -114,14 +114,23 @@ def validate_proposal(value):
                     or warmup["output_disposition"] != "DISCARDED" or warmup["rng_state_restored"] is not True
                     or not 0 <= _number(warmup["inference_duration_s"], "LEARNED_WARMUP_INPUT") <= _number(warmup["duration_s"], "LEARNED_WARMUP_INPUT")):
                 raise ContractError("LEARNED_WARMUP_INPUT")
+        if "hardware_wire_version" in inputs and (
+                type(inputs["hardware_wire_version"]) is not int
+                or inputs["hardware_wire_version"] not in (2, 3, 4, 5)):
+            raise ContractError("LEARNED_HARDWARE_SCHEMA")
         if causal:
             from .gripper_evidence import validate_temporal_policy
-            validate_temporal_policy(inputs["clock_binding"])
+            binding = validate_temporal_policy(inputs["clock_binding"])
+            expected_schema = (
+                "fr5.gripper_temporal_policy.v2"
+                if inputs["hardware_wire_version"] == 5
+                else "fr5.gripper_temporal_policy.v1"
+            )
+            if binding["schema_version"] != expected_schema:
+                raise ContractError("LEARNED_HARDWARE_SCHEMA")
         else:
             from .gripper_evidence import validate_clock_binding
             validate_clock_binding(inputs["clock_binding"])
-        if "hardware_wire_version" in inputs and (type(inputs["hardware_wire_version"]) is not int or inputs["hardware_wire_version"] not in (2, 3, 4)):
-            raise ContractError("LEARNED_HARDWARE_SCHEMA")
     if (p["joint_order"] != JOINTS or p["units"] != UNITS or p["action_semantics"] != "ABSOLUTE_JOINT_POSITION"
             or p["source_clock"] != "SYSTEM_TIME"):
         raise ContractError("LEARNED_ACTION_CONTRACT")
@@ -242,7 +251,7 @@ def held_target_segments(source, proposal):
     if ("release_position_m" in opened and not reference) or close["gripper_position_m"] == opened["gripper_position_m"]:
         raise ContractError("LEARNED_HELD_PROFILE_UNSUPPORTED")
     required = source["gripper_requirements"]
-    native = reference and p.get("runtime_inputs", {}).get("hardware_wire_version") == 4
+    native = reference and p.get("runtime_inputs", {}).get("hardware_wire_version") in (4, 5)
     profiles = {
         close["gripper_position_m"]: (close["limits"], required["acceptable_feedback_m"]),
         opened["gripper_position_m"]: (opened["limits"], {

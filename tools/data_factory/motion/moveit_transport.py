@@ -606,7 +606,8 @@ class RosMoveItTransport:
             raise ContractError("LEARNED_HARDWARE_CLOCK_BINDING")
         from rclpy.parameter import Parameter
         from tools.data_factory.rollout.gripper_evidence import native_clock_parameter, decode_dynamic_state, identity
-        causal = self._gripper_source_clock["schema_version"] == "fr5.gripper_temporal_policy.v1"
+        causal = self._gripper_source_clock["schema_version"] in ("fr5.gripper_temporal_policy.v1", "fr5.gripper_temporal_policy.v2")
+        successor = self._gripper_source_clock["schema_version"] == "fr5.gripper_temporal_policy.v2"
         if causal and self._gripper_source_clock["max_age_s"] != max_age_s:
             raise ContractError("LEARNED_HARDWARE_TEMPORAL_POLICY")
         deadline = time.monotonic() + self.preflight_timeout_s
@@ -615,11 +616,13 @@ class RosMoveItTransport:
             if self._gripper_hardware_state is not None:
                 observed = decode_dynamic_state(self._gripper_hardware_state, self._gripper_source_clock,
                                                 self._gripper_hardware_received_at)
-                if observed["wire"]["version"] in (1, 2, 3, 4):
+                if observed["wire"]["version"] in (1, 2, 3, 4, 5):
                     break
             self._rclpy.spin_once(self.node, timeout_sec=.01)
         if observed is None:
             raise ContractError("LEARNED_HARDWARE_CLOCK_BINDING")
+        if (successor and observed["wire"]["version"] != 5) or (not successor and observed["wire"]["version"] == 5):
+            raise ContractError("LEARNED_HARDWARE_INVALID")
         if ((not causal and observed["wire"]["version"] != 2) or observed["wire"]["stopped"] or observed["wire"]["error"]
                 or identity(observed["wire"]) != self._gripper_source_clock["incarnation"]):
             raise ContractError("LEARNED_HARDWARE_INCARNATION")
@@ -630,7 +633,7 @@ class RosMoveItTransport:
         if causal:
             from tools.data_factory.rollout.gripper_evidence import native_temporal_parameter
             expected = native_temporal_parameter(self._gripper_source_clock)
-            parameter_name = "gripper_temporal_policy_v1"
+            parameter_name = "gripper_temporal_policy_v2" if successor else "gripper_temporal_policy_v1"
         else:
             expected = native_clock_parameter(self._gripper_source_clock, max_age_s)
         result = self._wait(client.set_parameters_atomically([Parameter(parameter_name, value=expected)]),
@@ -651,6 +654,10 @@ class RosMoveItTransport:
         from tools.data_factory.rollout.gripper_evidence import check_current_bracket
         try:
             hw = self._gripper_hardware_evidence()
+            if self._gripper_source_clock["schema_version"] == "fr5.gripper_temporal_policy.v2":
+                from tools.data_factory.rollout.gripper_evidence import check_delivery
+                check_delivery(hw["wire"], self._gripper_source_clock, self._clock(), max_age_s)
+                return True
             check_current_bracket(hw["wire"], time.time(), self._clock(), max_age_s)
             versions = (3, 4) if self._gripper_source_clock["schema_version"] == "fr5.gripper_temporal_policy.v1" else (2,)
             return hw["wire"]["version"] in versions and hw["wire"]["valid"] == 1
@@ -1313,6 +1320,15 @@ class RosMoveItTransport:
                 **({"hardware_execution": hardware} if hardware is not None else {}),
             },
         }
+        if hardware is not None and hardware["wire"]["version"] == 5:
+            from tools.data_factory.rollout.gripper_evidence import check_delivery
+            wire = hardware["wire"]
+            check_delivery(wire, hardware["clock_binding"], self._clock(), max_age_s)
+            # Controller reference and lifecycle samples remain independently checked;
+            # measured coordinates all come from this one native SDK publication.
+            observation["joint_positions"] = [wire[f"arm_j{i}_rad"] for i in range(1, 7)]
+            observation["joint_state_age_s"] = self._clock() - wire["host_receive_steady_s"]
+            observation["gripper_controller"]["feedback_position_m"] = wire["feedback_m"]
         for key in ("arm_controller", "gripper_controller"):
             validate_controller_sample(observation[key])
         self._initial_snapshot_complete = True
