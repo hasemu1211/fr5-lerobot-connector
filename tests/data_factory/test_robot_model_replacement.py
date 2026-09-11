@@ -175,5 +175,122 @@ print("native launch/xacro: unchanged default, explicit candidate, both hardware
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
+    def test_nested_runtime_launches_propagate_selected_robot_model(self):
+        script = r"""
+import importlib.util
+from pathlib import Path
+import sys
+from unittest.mock import patch
+import xml.etree.ElementTree as ET
+
+from launch import LaunchContext, LaunchDescription
+from launch.actions import DeclareLaunchArgument
+
+root = Path(sys.argv[1])
+launch_dir = root / "src/fairino5_v6_moveit2_config/launch"
+
+original = (
+    root / "src/fairino_description/urdf/fairino5_v6.urdf"
+)
+candidate = original.with_name(
+    "fairino5_v6_gripper_opening_candidate.urdf"
+)
+
+cases = (
+    ("rsp.launch.py", "generate_rsp_launch"),
+    ("move_group.launch.py", "generate_move_group_launch"),
+    ("moveit_rviz.launch.py", "generate_moveit_rviz_launch"),
+)
+
+def load_case(filename, generator):
+    path = launch_dir / filename
+    spec = importlib.util.spec_from_file_location(
+        filename.replace(".", "_"),
+        path,
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    with patch.object(
+        module,
+        generator,
+        return_value=LaunchDescription(),
+    ) as consume:
+        description = module.generate_launch_description()
+
+    config = consume.call_args.args[0]
+    return description, config
+
+def expand(description, config, model=None, fake="true"):
+    context = LaunchContext()
+    context.launch_configurations["use_fake_hardware"] = fake
+
+    if model is not None:
+        context.launch_configurations["robot_model_file"] = str(model)
+
+    for item in description.entities:
+        if isinstance(item, DeclareLaunchArgument):
+            item.execute(context)
+
+    value = config.robot_description["robot_description"]
+    text = value.evaluate(context) if hasattr(value, "evaluate") else value
+    return ET.fromstring(text)
+
+def axis(robot, name):
+    return robot.find(
+        f"./joint[@name='{name}']/axis"
+    ).get("xyz")
+
+def expand_case(filename, generator, model=None, fake="true"):
+    # ParameterValue/Xacro evaluation is launch-instance scoped.
+    # A different robot model selection must use a fresh config object,
+    # exactly as a new ros2 launch invocation would.
+    description, config = load_case(filename, generator)
+    return expand(description, config, model, fake)
+
+for filename, generator in cases:
+    default = expand_case(filename, generator)
+    assert axis(default, "finger_right_joint") == "-1 0 0"
+    assert axis(default, "finger_left_joint") == "1 0 0"
+
+    fake = expand_case(
+        filename, generator, candidate, "true"
+    )
+    assert axis(fake, "finger_right_joint") == "1 0 0"
+    assert axis(fake, "finger_left_joint") == "-1 0 0"
+    assert (
+        fake.findtext(".//ros2_control/hardware/plugin")
+        == "mock_components/GenericSystem"
+    )
+
+    real = expand_case(
+        filename, generator, candidate, "false"
+    )
+    assert axis(real, "finger_right_joint") == "1 0 0"
+    assert axis(real, "finger_left_joint") == "-1 0 0"
+    assert (
+        real.findtext(".//ros2_control/hardware/plugin")
+        == "fairino_hardware/FairinoHardwareInterface"
+    )
+
+print(
+    "nested launch propagation: "
+    "default preserved, candidate propagated, "
+    "fake/real hardware selection PASS"
+)
+"""
+        result = subprocess.run(
+            ["/usr/bin/python3", "-c", script, str(ROOT)],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            result.stdout + result.stderr,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

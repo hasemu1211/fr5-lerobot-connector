@@ -18,6 +18,7 @@ from tools.fr5_data_factory import ContractError, canonical_digest, validate_mot
 from tools.data_factory.learned_action_adapter import fake_rgb
 from tools.data_factory.rollout.finite_plan import (
     FinitePolicyInference, JOINTS, compile_program, validate_proposal,
+    _limits, GRIPPER_ENDPOINT_PROJECTION_QUANTA,
 )
 from tools.data_factory.motion.pickup_executor import PickupExecutor
 from tools.data_factory.one_job import OneJob
@@ -728,14 +729,111 @@ class FinitePlanTest(unittest.TestCase):
         self.assertEqual(staged_program["source_program"], staged)
         self.assertEqual(staged_program["steps"], job._program["steps"])
         # Scripted staged-release context does not inject an extra policy row.
-        # The mode cannot legalize an out-of-bounds raw policy reference.
+        # Only explicit percent-reference mode may project bounded gripper
+        # endpoint noise. Raw policy output and all arm coordinates stay exact.
+        limits = _limits(data["robot_description"])
+        low, upper, _ = limits[-1]
+        projection_slack = (
+            GRIPPER_ENDPOINT_PROJECTION_QUANTA * upper / 100
+        )
+
         for raw_sample in data["samples"][:-1]:
             obs = observation()
             obs["observation.state"] = raw_sample["initial_state"]
-            with self.assertRaisesRegex(ContractError, "LEARNED_JOINT_LIMIT"):
-                FinitePolicyInference(lambda _: raw_sample["actions"], data["checkpoint"], source_clock=lambda: 10.).propose(
-                    obs, instruction="recorded CPU replay", robot_description=data["robot_description"],
-                    period_s=1 / 30, serialized_references=True, quantize_gripper=True)
+
+            # Retiming alone cannot legalize the out-of-range policy row.
+            with self.assertRaisesRegex(
+                ContractError, "LEARNED_JOINT_LIMIT"
+            ):
+                FinitePolicyInference(
+                    lambda _: raw_sample["actions"],
+                    data["checkpoint"],
+                    source_clock=lambda: 10.,
+                ).propose(
+                    obs,
+                    instruction="recorded CPU replay",
+                    robot_description=data["robot_description"],
+                    period_s=1 / 30,
+                    serialized_references=True,
+                    quantize_gripper=False,
+                )
+
+            adapted = FinitePolicyInference(
+                lambda _: raw_sample["actions"],
+                data["checkpoint"],
+                source_clock=lambda: 10.,
+            ).propose(
+                obs,
+                instruction="recorded CPU replay",
+                robot_description=data["robot_description"],
+                period_s=1 / 30,
+                serialized_references=True,
+                quantize_gripper=True,
+            )
+
+            self.assertEqual(
+                adapted["raw_actions"], raw_sample["actions"]
+            )
+            self.assertEqual(
+                [row[:6] for row in adapted["actions"]],
+                [row[:6] for row in raw_sample["actions"]],
+            )
+            self.assertTrue(
+                all(low <= row[-1] <= upper for row in adapted["actions"])
+            )
+
+            raw_excursion = max(
+                max(low - row[-1], row[-1] - upper, 0.)
+                for row in raw_sample["actions"]
+            )
+            self.assertGreater(raw_excursion, 0.)
+            self.assertLessEqual(
+                raw_excursion, projection_slack + 1e-12
+            )
+
+        # Anything beyond the explicit gripper projection budget stays illegal.
+        bad_gripper = copy.deepcopy(data["samples"][0])
+        bad_gripper["actions"][0][-1] = (
+            upper + projection_slack + 1e-9
+        )
+        obs = observation()
+        obs["observation.state"] = bad_gripper["initial_state"]
+        with self.assertRaisesRegex(
+            ContractError, "LEARNED_JOINT_LIMIT"
+        ):
+            FinitePolicyInference(
+                lambda _: bad_gripper["actions"],
+                data["checkpoint"],
+                source_clock=lambda: 10.,
+            ).propose(
+                obs,
+                instruction="recorded CPU replay",
+                robot_description=data["robot_description"],
+                period_s=1 / 30,
+                serialized_references=True,
+                quantize_gripper=True,
+            )
+
+        # Arm joint violations are never projected, even in percent mode.
+        bad_arm = copy.deepcopy(data["samples"][0])
+        bad_arm["actions"][0][0] = limits[0][1] + 1e-6
+        obs = observation()
+        obs["observation.state"] = bad_arm["initial_state"]
+        with self.assertRaisesRegex(
+            ContractError, "LEARNED_JOINT_LIMIT"
+        ):
+            FinitePolicyInference(
+                lambda _: bad_arm["actions"],
+                data["checkpoint"],
+                source_clock=lambda: 10.,
+            ).propose(
+                obs,
+                instruction="recorded CPU replay",
+                robot_description=data["robot_description"],
+                period_s=1 / 30,
+                serialized_references=True,
+                quantize_gripper=True,
+            )
         for change in ("actions", "raw_actions", "reference_timing"):
             altered = copy.deepcopy(p)
             if change == "reference_timing":

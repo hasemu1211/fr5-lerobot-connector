@@ -24,6 +24,7 @@ REFERENCE_PROPOSAL_SCHEMA = "data_factory.finite_learned_serialized_reference_pr
 JOINTS = ["j1", "j2", "j3", "j4", "j5", "j6", "finger_right_joint"]
 UNITS = ["rad"] * 6 + ["m"]
 REFERENCE_TICK_S = .01
+GRIPPER_ENDPOINT_PROJECTION_QUANTA = 2
 
 
 def _number(value, code):
@@ -192,21 +193,45 @@ def validate_proposal(value):
 
 
 def quantized_references(actions, limits):
-    """Explicit FAIRINO integer-percent representation; never clip position violations."""
+    """Explicit FAIRINO integer-percent gripper representation; never project arm limits."""
     try:
         rows = [list(_action(row)) for row in actions]
     except (TypeError, ValueError) as exc:
         raise ContractError("LEARNED_ACTION_7D") from exc
     if not 1 <= len(rows) <= 50:
         raise ContractError("LEARNED_HORIZON")
+    # Arm outputs are never projected. The explicitly selected native
+    # integer-percent gripper representation may project only a small
+    # endpoint overshoot; raw_actions retains the original policy output.
     for row in rows:
-        if any(not low <= value <= high for value, (low, high, _) in zip(row, limits)):
+        if any(
+            not low <= value <= high
+            for value, (low, high, _) in zip(row[:-1], limits[:-1])
+        ):
             raise ContractError("LEARNED_JOINT_LIMIT")
+
     low, upper, _ = limits[-1]
     if low != 0:
         raise ContractError("LEARNED_URDF_LIMITS")
+
+    quantum = upper / 100
+    endpoint_projection_slack = GRIPPER_ENDPOINT_PROJECTION_QUANTA * quantum
+
     for row in rows:
-        row[-1] = math.floor(row[-1] * 100 / upper + .5) * upper / 100
+        raw_gripper = row[-1]
+        if not (
+            low - endpoint_projection_slack
+            <= raw_gripper
+            <= upper + endpoint_projection_slack
+        ):
+            raise ContractError("LEARNED_JOINT_LIMIT")
+
+        bounded_gripper = min(upper, max(low, raw_gripper))
+        row[-1] = (
+            math.floor(bounded_gripper * 100 / upper + .5)
+            * upper / 100
+        )
+
     return rows
 
 
