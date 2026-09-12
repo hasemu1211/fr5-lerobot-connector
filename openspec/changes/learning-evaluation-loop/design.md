@@ -201,6 +201,15 @@ Original data/parents stay immutable. Physical work remains prohibited until
 the user's **복귀**. Local root supervisor and receipts:
 `.agent-local/work/lerobot-fr5/hold9k-20260912.py` and `hold9k-20260912/`.
 
+During this run the user reaffirmed rollout→diagnosis→targeted recollection as
+the next priority and made this the last current learning comparison. Finish
+this fixed comparison and preserve its evidence; do not open another training
+fork or metric search. If no clear improvement appears, leave the coordinator
+blocked for physical return rather than filling the wait with more learning.
+This is a resource/priority decision, not proof that learning cannot improve,
+and offline metric improvement is not a new precondition for the existing
+bounded physical rollout path.
+
 ## Subsequent 12k TRAIN-versus-heldout diagnosis
 
 User/root message `msg_d319051f4bf3` explicitly allocated this independent offline diagnosis while physical activity was stopped. No further training or robot/ROS/camera operation was performed. The unchanged12k checkpoint above was loaded once with its saved processors and TRAIN-only normalization. Before inference, TRAIN episodes2,3,10,11,18,19,26,27 were fixed as the middle pair in each consecutive eight-episode TRAIN block: four episodes per instruction spread across the32-episode partition. Each contributes q=.1/.5/.9, giving24 TRAIN observations. The original24 heldout observations from32–39 and all3 noise seeds remain unchanged. Time fractions are not annotated semantic phases. Observations differ between partitions; the native flow draw rule is identical, but `100000*seed+dataset_index` produces different draws on their different dataset indices.
