@@ -179,7 +179,7 @@ from unittest.mock import patch
 import xml.etree.ElementTree as ET
 from xacro import XacroException
 from launch import LaunchContext, LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from moveit_configs_utils import MoveItConfigsBuilder
 
 root = Path(sys.argv[1])
@@ -194,16 +194,20 @@ class SourceBuilder(MoveItConfigsBuilder):
 def expand(model=None, fake="false"):
     # ParameterValue caches evaluation within one launch. A new model selection
     # is a new launch, never a hot swap of the running description.
-    with patch.object(module, "MoveItConfigsBuilder", SourceBuilder), patch.object(module, "generate_demo_launch", return_value=LaunchDescription()) as consume:
-        description = module.generate_launch_description()
-    config = consume.call_args.args[0]
-    argument = next(item for item in description.entities if isinstance(item, DeclareLaunchArgument) and item.name == "robot_model_file")
     context = LaunchContext()
     context.launch_configurations["use_fake_hardware"] = fake
     if model is not None:
         context.launch_configurations["robot_model_file"] = str(model)
-    argument.execute(context)
-    return ET.fromstring(config.robot_description["robot_description"].evaluate(context))
+    with patch.object(module, "MoveItConfigsBuilder", SourceBuilder), patch.object(module, "generate_demo_launch", return_value=LaunchDescription()) as consume:
+        description = module.generate_launch_description()
+        consume.assert_not_called()
+        for item in description.entities:
+            assert isinstance(item, (DeclareLaunchArgument, OpaqueFunction)), "unexpected process action"
+            item.execute(context)
+        consume.assert_called_once()
+        config = consume.call_args.args[0]
+    value = config.robot_description["robot_description"]
+    return ET.fromstring(value.evaluate(context) if hasattr(value, "evaluate") else value)
 
 original = root / "src/fairino_description/urdf/fairino5_v6.urdf"
 candidate = original.with_name("fairino5_v6_gripper_opening_candidate.urdf")

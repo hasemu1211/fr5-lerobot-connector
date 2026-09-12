@@ -32,12 +32,43 @@ both falsifiers and alternate float encodings. Independent immutable review of
 findings and independently passes 74 tests in 9.744 seconds. It rejects
 re-digested mismatches in all seven processed columns, accepts six supported
 float encodings, and verifies validator-error priority and snapshot isolation.
-The whole-repository stable gate remains running; this source/CPU result does
-not qualify real policy loading or hardware execution. Hashes do not authenticate
+Whole discovery at the `6e82d55` source cutoff completed with 1,339 tests in
+1,608.228 seconds: 1,335 passed, two failed and two skipped. The failures were
+the missing explicit candidate SDK include and an eager-launch test fixture
+after the production launch became late-bound. The fixture now evaluates native
+launch declarations and the opaque setup under the mocked demo generator;
+default/selected model, hardware-mode and missing-model checks remain.
+Its affected suite passes seven tests with one external-SDK skip. The separately
+selected SDK build test passes in 2.823 seconds using a snapshot header whose
+SHA-256 `357d84c0aebb75947d24ca6bf0bff961f993b9eb576b57e2d13de859e1ac82bc`
+matches the canonical SDK patch. Missing selected headers still fail; an
+unselected external SDK is explicitly opt-in, like the existing SDK integration.
+No full discovery was repeated or relabeled as an exact new-cutoff PASS.
+These source/CPU results do not qualify hardware execution. Hashes do not authenticate
 an externally fabricated sidecar. This does not connect the rollout CLI to physical execution: plugin
 `send_action` remains blocked and source/destination-bound pick-place failure
 recollection remains open. Do not treat proposal diagnostics as terminal
 execution traces or training targets.
+
+Follow-up `23891ce` corrects the tap's prediction/consumption-length conflation:
+LeRobot's `chunk_size` defines the full prediction; native `select_action` owns
+`n_action_steps` consumption and reinference. The full tensor remains untouched
+and independently retained. Root and independent immutable review each pass
+26 focused tests; unequal-horizon queue falsifiers pass without a model load.
+No saved/runtime horizon, speed, approval or physical-execution setting changed.
+The current full-chunk proposal sidecar still requires equal raw/processed/action
+row counts; this tap correction alone does not implement prefix proposal binding.
+
+Learning's saved-output serialized check is complete at
+`.agent-local/work/lerobot-fr5/learning-rhythm40-20260912/serialized-feasibility-r1/REPORT.md`.
+At plugin-default scaling `.03`, none of 72 sampled 12k chunks fits the existing
+five-second reference horizon after valid quantization. At native ceiling `.1`,
+38 pass reference timing; ten reject earlier on gripper bounds, and a separate
+source-derived held-time necessary budget leaves only 24 not yet excluded.
+These are numerical checks, not execution approvals or physical failure labels.
+Do not select favorable seeds, discard late chunks, or relax limits to claim
+success. Learning's owner is now preparing a research/source-grounded continuation
+of the existing 12k training state; no further GPU run has been launched.
 
 Preexisting user plugin edits were retained; a recoverable source copy is under
 `.agent-local/work/lerobot-fr5/pre-attempt-evidence-2UjzcV`. Original observations,
