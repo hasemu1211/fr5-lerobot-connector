@@ -544,14 +544,16 @@ def _evaluate(args: argparse.Namespace, admission: dict) -> dict:
         evaluated_batches == available_batches
         and all(item["evaluation_complete"] for item in episode_metrics)
     )
+    train_diagnostic = admission.get("diagnostic_partition") == "train"
+    partition_scope = "train_diagnostic" if train_diagnostic else "heldout"
     report = {
         "schema_version": 4,
         "metric": "smolvla_offline_flow_matching_loss",
         "warning": "Offline loss does not measure real-robot task success.",
         "evidence_scope": (
-            "admitted_heldout_offline_loss"
+            f"admitted_{partition_scope}_offline_loss"
             if evaluation_complete
-            else "bounded_admitted_heldout_offline_loss"
+            else f"bounded_admitted_{partition_scope}_offline_loss"
         ),
         "checkpoint": checkpoint,
         "checkpoint_tree_digest": admission["checkpoint_tree_digest"],
@@ -568,7 +570,10 @@ def _evaluate(args: argparse.Namespace, admission: dict) -> dict:
         "episode_macro_loss_mean": statistics.fmean(
             item["loss_mean"] for item in episode_metrics if item["samples"]
         ),
-        "episode_macro_scope": "complete_heldout" if evaluation_complete else "observed_samples_only",
+        "episode_macro_scope": (
+            ("complete_train_diagnostic_subset" if train_diagnostic else "complete_heldout")
+            if evaluation_complete else "observed_samples_only"
+        ),
         "batch_size": args.batch_size,
         "requested_max_batches": args.max_batches,
         "available_batches": available_batches,
@@ -603,6 +608,8 @@ def _evaluate(args: argparse.Namespace, admission: dict) -> dict:
             ),
         },
     }
+    if train_diagnostic:
+        report["diagnostic_partition"] = "train"
     return report
 
 

@@ -563,6 +563,37 @@ class OfflineEvaluationTest(unittest.TestCase):
                             if complete else "bounded_admitted_heldout_offline_loss",
                         )
 
+    def test_train_flow_report_never_claims_heldout_or_full_train_coverage(self):
+        with TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
+            args, _ = admitted_case(Path(directory))
+            original = admit_evaluation(args)
+            admission = training_diagnostic_admission(original, [0])
+            batches = [{
+                "episode_index": SimpleNamespace(detach=lambda: SimpleNamespace(
+                    cpu=lambda: SimpleNamespace(tolist=lambda: [0]))),
+                "camera": SimpleNamespace(dtype="float"), "loss": [loss],
+            } for loss in (1.0, 3.0)]
+            with mock.patch.dict(sys.modules, fake_inference_modules(admission, batches)), mock.patch(
+                "tools.evaluate_smolvla_offline.smolvla_camera_mapping", return_value=({}, [])
+            ):
+                for limit, complete in ((1, False), (2, True)):
+                    with self.subTest(max_batches=limit):
+                        args.max_batches = limit
+                        report = evaluate(args, admission)
+                        self.assertEqual(report["diagnostic_partition"], "train")
+                        self.assertEqual(report["admitted_episodes"], [0])
+                        self.assertEqual(report["episodes"], [0])
+                        self.assertEqual(report["train_episodes"], original["split"]["train_episodes"])
+                        self.assertEqual(report["evaluation_complete"], complete)
+                        self.assertEqual(report["samples"], limit)
+                        self.assertEqual(report["loss_mean"], 2.0 if complete else 1.0)
+                        self.assertEqual(report["evidence_scope"],
+                            "admitted_train_diagnostic_offline_loss" if complete
+                            else "bounded_admitted_train_diagnostic_offline_loss")
+                        self.assertEqual(report["episode_macro_scope"],
+                            "complete_train_diagnostic_subset" if complete else "observed_samples_only")
+            self.assertEqual(original["episodes"], original["split"]["eval_episodes"])
+
     def test_nonfinite_loss_never_publishes_a_report(self):
         for loss in (float("nan"), float("inf"), -float("inf")):
             with self.subTest(loss=loss), TemporaryDirectory(prefix="SYNTHETIC_TEST_ONLY-") as directory:
