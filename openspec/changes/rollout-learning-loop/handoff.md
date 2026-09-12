@@ -2,6 +2,49 @@
 
 ## September 12 continuation: LeRobot pick-place integration
 
+### Original-transition recollection is now software-connected
+
+Owner commit `a62771a85f97015524be31d7b34d6779bf359420`, integrated as
+`6ceca2762b8622536a74b04dbd92dfe5ccb1d289`, retains the destination resolver
+receipt alongside the existing source receipt for learned v4 preapproval.
+Recommendation generation now binds the original directed SOURCE/DESTINATION
+pair, instruction, object, calibration, region and qualified motion preset,
+then supplies normal paired `DIRECT_EDIT` authoring. Current Scene placement is
+kept separately: when it differs within the supported cycle, qualified ordinary
+transitions precede replay of the original pair instead of rewriting Scene
+history. Missing historical destination evidence, incompatible domains,
+insufficient episode budget and unsupported rotated release remain explicit
+unavailable cases. Existing pickup recommendations remain supported.
+
+The owner ran 80 focused CPU tests in 425.353 s, exit 0, covering acquisition,
+recommendation, native draft application/compilation, evidence boundaries and
+three producer/preapproval checks. Its `focused.log` SHA-256 is
+`166fbe6eacfa2a61a7a8c48e994c5faf4f07b68b99f57a896ffe71df838cc8ca`.
+Root inspected the actual producer/consumer diff. On integrated `6ceca27`,
+`direnv exec . python3 -m unittest` with
+`tests.data_factory.operator.test_acquisition_advice.AcquisitionAdviceTests.test_original_transition_roundtrips_native_paired_draft_and_compile`,
+`tests.data_factory.operator.test_acquisition_advice.AcquisitionAdviceTests.test_recovered_transition_keeps_current_pose_then_original_pair`, and
+`tests.data_factory.test_run_job.RunJobTest.test_learned_preapproval_retains_exact_original_resolver_inputs`
+passes 3 tests in 136.526 s, exit 0. The log is
+`.agent-local/work/lerobot-fr5/transition-main-integration-20260912.log`.
+The owner's broader unchanged 80-test scope was not duplicated; full discovery
+was not run. This closes a software connection, not a physical
+loop: semantic failure remains distinct from causal data shortage, and advice
+does not grant motion, semantic success or training authority. No real learned
+Pick or targeted-recollection effectiveness is claimed.
+
+Resource status changed again after the stopped r1 below. Learning's isolated
+candidate `fefdc323bddbca0a635c8cb7341ae66f93707288` releases recreated EVAL
+workers after evaluation and started a distinct `continue-18000-r2` from the
+original 12k. Root observed supervisor3517820 holding the existing heavy-work
+lock and actual trainer3517887 performing updates. This candidate is not yet
+integrated or independently qualified by root. A root model-first probe exited
+at that lock before model load; robot bring-up was not attempted. Camera-only
+measurements at21:25 KST passed the existing brightness threshold, but cannot
+authorize a later light state. Orca app327728 remains running while its runtime
+reports disconnected/starting; queries and `open` timed out. Do not infer lane
+death, duplicate work or approved runtime recovery from these tool failures.
+
 ### Latest resource result: continuation stopped; original 12k remains usable
 
 The approved 12k-to-18k run below is no longer running. Its owner resource
