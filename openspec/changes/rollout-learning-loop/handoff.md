@@ -18,8 +18,11 @@ independent immutable review is pending. No execution bound, motion owner,
 checkpoint, data, scene or approval changed. No learned/gripper goal was sent.
 The next physical-input check must use a new fresh observation and current
 runtime, not replay the saved r5 output as live authority. GPU is meanwhile
-assigned to Learning's approved 12k-to-18k continuation; its agent accepted the
-handoff, but actual training launch has not yet been confirmed. Further training
+assigned to Learning's approved 12k-to-18k continuation. Owner message
+`msg_5758ebcbf18b` reports the production wrapper running as PID 3416314 under
+supervisor 3416141, with original data/checkpoints preserved and capacity for
+the two planned saves plus its existing reserve. This establishes launch, not
+yet an optimizer update or completed checkpoint. Further training
 is not a prerequisite for rollout. Evidence and exact logs remain in the local
 probe report linked below.
 
