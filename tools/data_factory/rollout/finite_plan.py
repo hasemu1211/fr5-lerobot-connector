@@ -805,10 +805,14 @@ def validate_learned_program(value):
     source = value.get("source_program")
     if (
         not isinstance(source, dict)
-        or source.get("schema_version") != "fr5.motion_program.v2"
+        or source.get("schema_version") not in {
+            "fr5.motion_program.v2", "fr5.motion_program.v4",
+        }
     ):
         raise ContractError("LEARNED_SOURCE_PROGRAM")
 
+    # v4 carries both qualified workspace endpoints. Preserve them verbatim;
+    # the canonical source validator still owns their compatibility and digest.
     source = validate_motion_program(copy.deepcopy(source))
     proposal = validate_proposal(value.get("learned_proposal"))
 

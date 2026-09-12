@@ -65,6 +65,33 @@ def proposal():
     return FinitePolicyInference(lambda _: [ACTION[:]], CHECKPOINT, source_clock=lambda: 10.).propose(observation(), **OPTIONS)
 
 
+def cross_workspace_source():
+    value = source()
+    destination = copy.deepcopy(value["binding_digests"])
+    destination.update(cell_calibration=canonical_digest("cell-b"),
+                       motion_qualification=canonical_digest("qualification-b"))
+    endpoints = [
+        {"workspace_id": place, "cell_calibration_id": cell,
+         "cell_calibration_digest": bindings["cell_calibration"],
+         "motion_recipe_digest": bindings["motion_qualification"]}
+        for place, cell, bindings in (
+            ("PLACE_A", "cal-a", value["binding_digests"]),
+            ("PLACE_B", "cal-b", destination),
+        )
+    ]
+    value.update(schema_version="fr5.motion_program.v4",
+                 destination_resolved_job_digest=canonical_digest("destination-job"),
+                 destination_binding_digests=destination,
+                 endpoint_bindings=endpoints,
+                 endpoint_bindings_digest=canonical_digest(endpoints))
+    for step in value["steps"]:
+        if step.get("pause_after") == "SEMANTIC_VERDICT":
+            step.pop("pause_after")
+        if step["phase"] == "RETREAT_LIN":
+            step["pause_after"] = "SEMANTIC_VERDICT"
+    return validate_motion_program(value)
+
+
 def redigest(p):
     p["proposal_digest"] = canonical_digest({k: v for k, v in p.items() if k != "proposal_digest"})
     return p
@@ -2087,6 +2114,49 @@ class FinitePlanTest(unittest.TestCase):
         self.assertTrue(cell.ready)
         self.assertEqual(scene.updates, [])
         self.assertEqual(_operator_summary(job._result())["path"], ["LEARNED_CHUNK"])
+
+    def test_cross_workspace_native_source_retains_both_endpoints(self):
+        src = cross_workspace_source()
+        original = copy.deepcopy(src)
+        program = compile_program(src, proposal())
+        self.assertEqual(validate_motion_program(program), program)
+        self.assertEqual(program["source_program"], original)
+        for key in ("destination_resolved_job_digest", "destination_binding_digests",
+                    "endpoint_bindings", "endpoint_bindings_digest"):
+            self.assertEqual(program[key], original[key])
+        self.assertEqual(src, original)
+        # Exercise the normal OneJob -> sole executor plan-only consumer too.
+        with mock.patch(__name__ + ".source", return_value=src):
+            job, _, transport, cell, scene, _, calls = self.make_job()
+        self.assertEqual(job.plan_envelope["plan"]["learned_source_program"], original)
+        self.assertEqual(transport.sent, [])
+        self.assertEqual(scene.updates, [])
+        self.assertTrue(cell.ready)
+        self.assertFalse(any(target == "recorder" for target, _ in calls))
+
+    def test_cross_workspace_native_source_rejects_invalid_endpoint_bindings(self):
+        for corruption in ("missing", "reordered", "recipe", "incompatible"):
+            with self.subTest(corruption=corruption):
+                src = cross_workspace_source()
+                if corruption == "missing":
+                    src.pop("destination_binding_digests")
+                elif corruption == "reordered":
+                    src["endpoint_bindings"].reverse()
+                elif corruption == "recipe":
+                    src["endpoint_bindings"][1]["motion_recipe_digest"] = canonical_digest("other")
+                else:
+                    src["destination_binding_digests"]["robot_system"] = canonical_digest("other-robot")
+                src["endpoint_bindings_digest"] = canonical_digest(src["endpoint_bindings"])
+                with self.assertRaises(ContractError):
+                    compile_program(src, proposal())
+
+    def test_native_source_still_rejects_unknown_or_nested_program_versions(self):
+        for schema in ("fr5.motion_program.v3", "fr5.motion_program.v999", "fr5.learned_motion_program.v1"):
+            with self.subTest(schema=schema):
+                src = source()
+                src["schema_version"] = schema
+                with self.assertRaisesRegex(ContractError, "LEARNED_SOURCE_PROGRAM"):
+                    compile_program(src, proposal())
 
     def test_chunk_boundary_keeps_one_recorder_and_bound_fresh_observation(self):
         job, executor, transport, cell, scene, now, calls = self.start_job()
