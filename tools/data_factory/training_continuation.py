@@ -13,6 +13,7 @@ def native_continuation(trainer, *, checkpoint: Path, state: dict, schedule: dic
                         batch_size: int):
     """Keep native optimizer/RNG restoration and bind a committed single-process cursor."""
     import torch
+    from accelerate import Accelerator
     from lerobot.utils.random_utils import get_rng_state, set_rng_state
     from tools.fr5_data_factory import ContractError
     from tools.data_factory.training_approval import _write_exclusive
@@ -23,7 +24,12 @@ def native_continuation(trainer, *, checkpoint: Path, state: dict, schedule: dic
     committed_step = state["step"]
     pending = None
     restored_rng = None
+    persistent = "persistent_eval_started" in state
+    eval_started = state.get("persistent_eval_started", False)
+    eval_frequency = 0
+    eval_present = False
     original_build = trainer.make_optimizer_and_scheduler
+    original_prepare = Accelerator.prepare
     original_load = trainer.load_training_state
     original_cycle = trainer.cycle
     original_update = trainer.update_policy
@@ -35,6 +41,8 @@ def native_continuation(trainer, *, checkpoint: Path, state: dict, schedule: dic
         return {"epoch": cursor["epoch"], "start_index": cursor["offset"]}
 
     def build(cfg, policy):
+        nonlocal eval_frequency
+        eval_frequency = cfg.eval_steps
         horizon = cfg.steps
         try:
             cfg.steps = schedule["native_horizon"]
@@ -48,6 +56,26 @@ def native_continuation(trainer, *, checkpoint: Path, state: dict, schedule: dic
             scheduler.lr_lambdas = [lambda step, fn=fn: fn(min(step, boundary))
                                     for fn in scheduler.lr_lambdas]
         return optimizer, scheduler
+
+    def prepare(accelerator, *args, **kwargs):
+        nonlocal eval_present
+        if persistent:
+            loaders = [arg for arg in args if isinstance(arg, torch.utils.data.DataLoader)]
+            if not 1 <= len(loaders) <= 2:
+                raise ContractError("TRAINING_CONTINUATION_LOADER")
+            eval_present = len(loaders) == 2
+            for index, loader in enumerate(loaders):
+                if (loader.num_workers != 4 or loader.prefetch_factor != 4
+                        or not loader.persistent_workers
+                        or loader.multiprocessing_context.get_start_method() != "spawn"):
+                    raise ContractError("TRAINING_CONTINUATION_LOADER")
+                if index == 0 or eval_started:
+                    # These persistent workers already existed before the checkpoint.
+                    # Recreate them without another policy CPU-RNG base-seed draw.
+                    # Their unsaved RNG is irrelevant to this deterministic map path;
+                    # sample order belongs to the native (seed, epoch) sampler.
+                    loader.generator = torch.Generator().set_state(torch.get_rng_state())
+        return original_prepare(accelerator, *args, **kwargs)
 
     def load(path, optimizer, scheduler, **kwargs):
         nonlocal restored_rng
@@ -80,10 +108,11 @@ def native_continuation(trainer, *, checkpoint: Path, state: dict, schedule: dic
         while True:
             if pending is not None:
                 raise ContractError("TRAINING_CONTINUATION_UNCOMMITTED_BATCH")
-            rng = get_rng_state() if first and cursor["offset"] else None
+            rng = get_rng_state() if first and cursor["offset"] and not persistent else None
             batch = next(iterator)
-            # A recreated partial-epoch iterator must not add a base-seed draw.
-            # At an epoch boundary its ordinary RNG consumption must remain.
+            # Workers0 recreates an iterator every epoch: keep ordinary boundary
+            # draws, but remove the extra mid-epoch draw. Persistent workers above
+            # use their own seeding generator at either restart position.
             if rng is not None:
                 set_rng_state(rng)
             first = False
@@ -111,14 +140,23 @@ def native_continuation(trainer, *, checkpoint: Path, state: dict, schedule: dic
             raise ContractError("TRAINING_CONTINUATION_SAVE_POSITION")
         rng = get_rng_state()
         original_save(**kwargs)
-        _write_exclusive(Path(kwargs["checkpoint_dir"]) / "training_state" / CONTINUATION_STATE,
-                         {"schema_version": "fr5-native-continuation-state-v1", "step": committed_step,
-                          "cursor": cursor, "schedule": schedule,
-                          "python_gauss": rng["random_state"][2],
-                          "numpy_gauss": float(rng["numpy_random_state"][4])},
+        saved = {"schema_version": "fr5-native-continuation-state-v1", "step": committed_step,
+                 "cursor": cursor, "schedule": schedule,
+                 "python_gauss": rng["random_state"][2],
+                 "numpy_gauss": float(rng["numpy_random_state"][4])}
+        if persistent:
+            # Native evaluation precedes saving. Retain its iterator's history even
+            # when a later continuation changes the evaluation cadence.
+            started = eval_started or (eval_present and eval_frequency > 0
+                and committed_step // eval_frequency > state["step"] // eval_frequency)
+            saved.update(schema_version="fr5-native-continuation-state-v2",
+                         persistent_eval_started=started)
+        _write_exclusive(Path(kwargs["checkpoint_dir"]) / "training_state" / CONTINUATION_STATE, saved,
                          "TRAINING_CONTINUATION_STATE_EXISTS")
 
     with ExitStack() as stack:
+        if persistent:
+            stack.enter_context(patch.object(Accelerator, "prepare", prepare))
         for name, value in (("compute_sampler_state", sample_state), ("make_optimizer_and_scheduler", build),
                             ("load_training_state", load), ("cycle", cycle), ("update_policy", update),
                             ("save_checkpoint", save)):

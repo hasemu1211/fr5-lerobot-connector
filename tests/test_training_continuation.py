@@ -64,13 +64,14 @@ class TinyDataset(torch.utils.data.Dataset):
 
 
 class TinyPolicy(torch.nn.Module):
-    def __init__(self, cfg, trace):
+    def __init__(self, cfg, trace, cached_gaussians=True):
         super().__init__()
         self.config = cfg
         self.weight = torch.nn.Parameter(torch.tensor([.1, -.2]))
         if cfg.pretrained_path:
             self.load_state_dict(load_file(Path(cfg.pretrained_path) / "model.safetensors"))
         self.trace = trace
+        self.cached_gaussians = cached_gaussians
 
     def get_optim_params(self):
         return self.parameters()
@@ -78,10 +79,11 @@ class TinyPolicy(torch.nn.Module):
     def forward(self, batch):
         noise = torch.randn(2)
         # Exercise native RNG plus caches omitted/rounded by native serialization.
-        scalar = random.gauss(0, 1) + float(np.random.normal())
+        scalar = (random.gauss(0, 1) + float(np.random.normal()) if self.cached_gaussians
+                  else random.random() + float(np.random.random()))
         loss = (self.weight - noise - batch["action"].mean() / 13 - scalar).square().sum()
         self.trace.append({"indices": batch["action"].flatten().tolist(), "noise": noise.tolist(),
-                           "scalar": scalar, "loss": loss.item()})
+                           "scalar": scalar, "loss": loss.item(), "training": self.training})
         return loss, {}
 
     def save_pretrained(self, directory, **kwargs):
@@ -123,15 +125,19 @@ class NativeContinuationTest(unittest.TestCase):
             self.trace[-1].update(lr=result[0].lr.val, weights=args[1].weight.detach().tolist())
             return result
 
-        self.stack.enter_context(patch.object(self.trainer, "update_policy", side_effect=record))
+        # A recording Mock retains every accelerator in call_args, including its
+        # persistent workers across segments. Only the explicit scalar trace is needed.
+        self.stack.enter_context(patch.object(self.trainer, "update_policy", record))
 
-    def initial(self):
+    def initial(self, workers=0, eval_steps=0, batch_size=1):
         from lerobot.configs.default import DatasetConfig
         from lerobot.configs.train import TrainPipelineConfig
         from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
         cfg = TrainPipelineConfig(dataset=DatasetConfig(repo_id="local/tiny", root=self.root, eval_split=.2),
             policy=SmolVLAConfig(device="cpu", push_to_hub=False), output_dir=self.root / "parent",
-            steps=12, batch_size=1, num_workers=0, save_freq=3, log_freq=0, eval_steps=0)
+            steps=12, batch_size=batch_size, num_workers=workers, save_freq=3, log_freq=0,
+            eval_steps=eval_steps, prefetch_factor=4, persistent_workers=bool(workers),
+            dataloader_multiprocessing_context="spawn" if workers else None)
         with patch("sys.argv", ["tiny"]):
             self.trainer.train(cfg)
         parent = cfg.output_dir / "checkpoints/000003/pretrained_model"
@@ -238,6 +244,56 @@ class NativeContinuationTest(unittest.TestCase):
             first, first_state, actual = self.run_segment(parent, state, state["schedule"], 5, "eval-first", 2)
             _, _, part = self.run_segment(first, first_state, state["schedule"], 9, "eval-final", 2)
         self.assertEqual(actual + part, expected)
+
+    def persistent_worker_case(self, eval_steps, first_end, second_end):
+        # No omitted Gaussian cache in this legacy fixture. Existing tests above
+        # separately cover the continuation sidecar's cached Gaussian states.
+        with patch.object(self.trainer, "make_policy", side_effect=lambda cfg, **_: TinyPolicy(
+                cfg, self.trace, cached_gaussians=False)), patch.object(
+                self.trainer, "make_train_eval_datasets", return_value=(TinyDataset(), TinyDataset())):
+            parent = self.initial(workers=4, eval_steps=eval_steps, batch_size=4)
+            # One case has evaluated before the step3 save; the other first
+            # evaluates after resume. Their base-seed histories differ.
+            full_trace = copy.deepcopy(self.trace)
+            expected = full_trace[3 + (4 if eval_steps == 3 else 0):]
+            original = tree_digest(parent.parent)
+            state = continuation_checkpoint_state(parent, self.receipt)
+            self.assertEqual(state["persistent_eval_started"], eval_steps == 3)
+            first, first_state, actual = self.run_segment(parent, state, state["schedule"], first_end, "workers-first", eval_steps)
+            self.assertEqual(first_state["cursor"]["offset"], 0 if first_end == 4 else 4)
+            self.assertEqual(first_state["persistent_eval_started"], eval_steps == 3)
+            first_digest = tree_digest(first.parent)
+            second, second_state, part = self.run_segment(first, first_state, state["schedule"], second_end, "workers-second", eval_steps)
+            actual += part
+            second_digest = tree_digest(second.parent)
+            final, final_state, part = self.run_segment(second, second_state, state["schedule"], 12, "workers-final", eval_steps)
+            actual += part
+            if state["persistent_eval_started"]:
+                # Negative control, intentionally bypassing admission: losing the
+                # EVAL history adds a seed draw and changes subsequent policy RNG.
+                _, _, wrong = self.run_segment(parent, {**state, "persistent_eval_started": False},
+                                               state["schedule"], 7, "wrong-eval-history", eval_steps)
+                self.assertNotEqual(wrong[-1]["noise"], expected[len(wrong) - 1]["noise"])
+        self.assertEqual(actual, expected)
+        self.assertEqual([len(row["indices"]) for row in actual if row["training"]], [1, 4, 4, 4, 1, 4, 4, 4, 1])
+        self.assertEqual(final_state["cursor"], {"num_frames": 13, "epoch": 3, "offset": 0, "samples_consumed": 39})
+        self.assertTrue(final_state["persistent_eval_started"])
+        reference = parent.parents[1] / "000012"
+        for filename in ("optimizer_state.safetensors", "rng_state.safetensors"):
+            a = load_file(reference / "training_state" / filename)
+            b = load_file(final.parent / "training_state" / filename)
+            for key in a:
+                torch.testing.assert_close(a[key], b[key], rtol=0, atol=0)
+        self.assertEqual(json.loads((reference / "training_state/scheduler_state.json").read_text()),
+                         json.loads((final.parent / "training_state/scheduler_state.json").read_text()))
+        for checkpoint, digest in ((parent, original), (first, first_digest), (second, second_digest)):
+            self.assertEqual(tree_digest(checkpoint.parent), digest)
+
+    def test_persistent_workers_match_legacy_then_two_resumes_with_evaluation(self):
+        self.persistent_worker_case(eval_steps=3, first_end=4, second_end=7)
+
+    def test_persistent_first_evaluation_keeps_seed_draw_after_resume(self):
+        self.persistent_worker_case(eval_steps=6, first_end=5, second_end=9)
 
     def test_public_same_output_recovery_twice_with_native_saved_sources(self):
         from tests.data_factory.training_fixtures import admitted_case
@@ -394,6 +450,33 @@ class ContinuationAdmissionTest(unittest.TestCase):
             inventory=self.args.approved_inventory, profile="smolvla",
             collection_profile=self.split["feature_contract"]["collection_profile_id"], argv=self.argv)
 
+    def persistent_parent(self):
+        config_file = self.parent / "train_config.json"
+        cfg = json.loads(config_file.read_text())
+        cfg.update(num_workers=4, prefetch_factor=4, persistent_workers=True,
+                   dataloader_multiprocessing_context="spawn", eval_steps=1)
+        config_file.write_text(json.dumps(cfg))
+        return config_file, cfg
+
+    def test_persistent_parent_admission_and_entrypoint_inherit_workers_and_eval_history(self):
+        self.persistent_parent()
+        self.test_admission_binds_parent_without_reset_and_dry_run_uses_existing_launch()
+        self.test_native_entrypoint_uses_parent_state_and_only_allowed_native_overrides()
+        from tools.data_factory.training_entrypoint import prepare_launch
+        _, receipt = prepare_launch(**self.kwargs)
+        self.assertTrue(receipt["initialization"]["persistent_eval_started"])
+
+    def test_unsupported_workers_or_stochastic_transforms_still_fail(self):
+        config_file, cfg = self.persistent_parent()
+        for changes in ({"num_workers": 2}, {"num_workers": True}, {"prefetch_factor": 2},
+                        {"persistent_workers": False}, {"dataloader_multiprocessing_context": "fork"},
+                        {"dataset": {**cfg["dataset"], "image_transforms": {"enable": True}}}):
+            with self.subTest(changes=changes):
+                config_file.write_text(json.dumps({**cfg, **changes}))
+                with self.assertRaisesRegex(ValueError, "deterministic transforms"):
+                    continuation_checkpoint_state(self.parent, self.receipt)
+        self.assertFalse(self.output.exists())
+
     def test_admission_binds_parent_without_reset_and_dry_run_uses_existing_launch(self):
         from tools.data_factory.training_entrypoint import prepare_launch, continue_training
         from contextlib import redirect_stdout
@@ -462,8 +545,16 @@ class ContinuationAdmissionTest(unittest.TestCase):
         state = {"schema_version": "fr5-native-continuation-state-v1", "step": 6,
                  "cursor": advance_sample_cursor(initial["cursor"], 5, 4), "schedule": initial["schedule"],
                  "python_gauss": None, "numpy_gauss": 0.0}
+        if "persistent_eval_started" in initial:
+            state.update(schema_version="fr5-native-continuation-state-v2", persistent_eval_started=True)
         (training / CONTINUATION_STATE).write_text(json.dumps(state))
         self.assertEqual(validate_checkpoint(child), (child, self.output))
+        if "persistent_eval_started" in state:
+            for wrong in (False, 1, None):
+                (training / CONTINUATION_STATE).write_text(json.dumps({**state, "persistent_eval_started": wrong}))
+                with self.assertRaisesRegex(ValueError, "committed state"):
+                    continuation_checkpoint_state(child, receipt)
+            (training / CONTINUATION_STATE).write_text(json.dumps(state))
         argv = continuation_argv(child, receipt, output=self.root / "outputs/second", steps=10,
                                   batch_size=2, eval_steps=2, save_freq=2, schedule="preserve")
         binding = continuation_binding(child, split, receipt["normalization"], argv)
@@ -473,6 +564,17 @@ class ContinuationAdmissionTest(unittest.TestCase):
         (self.parent / "model.safetensors").write_bytes(b"changed")
         with self.assertRaisesRegex(ValueError, "differs|binding|provenance changed"):
             validate_checkpoint(child)
+
+    def test_persistent_child_eval_history_and_ancestor_binding_are_validated(self):
+        self.persistent_parent()
+        self.test_saved_child_and_second_binding_revalidate_all_ancestors()
+
+    def test_persistent_child_records_first_eval_after_legacy_parent(self):
+        config_file, cfg = self.persistent_parent()
+        cfg["eval_steps"] = 2  # legacy step1 has not evaluated yet
+        config_file.write_text(json.dumps(cfg))
+        self.assertFalse(continuation_checkpoint_state(self.parent, self.receipt)["persistent_eval_started"])
+        self.test_saved_child_and_second_binding_revalidate_all_ancestors()
 
     def test_public_wrapper_dry_run_and_mutual_exclusion(self):
         import os

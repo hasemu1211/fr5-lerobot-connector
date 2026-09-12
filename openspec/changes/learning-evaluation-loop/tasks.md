@@ -20,6 +20,7 @@
 - [x] Make a same-parent, matched-exposure lower-peak adaptation comparison executable through the existing native warm-start path; verify policy CLI precedence and the built schedule, and hand off checkpoint/evaluation, resource and stop/extend criteria without issuing training authority.
 
 - [x] Implement new-output continuation through native state restoration and existing admission, with immutable parents, explicit schedule prefix and committed sample position verified through repeated CPU-small native resumes; preserve legacy resume and explicit warm-start resets.
+- [x] Extend deterministic native continuation to the rhythm40 workers4/prefetch4/persistent/spawn recipe; qualify policy RNG, TRAIN/EVAL iterator history, uneven epochs, repeated resumes and immutable parent binding with focused CPU fixtures. Actual-policy launch and reload remain root-owned.
 - [ ] Root qualifies the admitted real-policy continuation, saved checkpoint and independent reload under the supported runtime scope before treating the longer curve as native policy evidence.
 - [x] Make a resource-based longer development curve executable with a declared schedule intervention, checkpoint cadence, evaluation comparability and stop/extension criteria; retain historical comparisons and distinguish numerical solver evidence from learning quality.
 

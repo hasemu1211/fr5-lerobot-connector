@@ -148,7 +148,7 @@ The lane SHALL choose the next safe valuable outcome using code/tests, current a
 - **AND** `preserve` rebuilds the original native horizon and retains its inherited future, while `hold` appends the parent's current LR as a constant tail without changing the prefix through the parent step; subsequent resumes inherit the original horizon and any existing hold boundary
 - **AND** each child saves a committed cursor and schedule descriptor beside native optimizer/scheduler/RNG state, including Python and NumPy Gaussian caches; missing or inconsistent state is rejected
 - **AND** reconstruction from a legacy checkpoint is limited to unresumed, constant-batch, single-process history and its actually serialized RNG; omitted historical Gaussian caches cannot be recovered or represented as uninterrupted legacy equivalence
-- **AND** the supported extension is native SmolVLA with one process, zero workers, deterministic transforms, no AMP/compilation/streaming/weighted sampling or dropped frames; runtime checks reject unsupported accumulation or skipped updates
+- **AND** the supported extension is native SmolVLA with one process, zero workers or the qualified persistent four-worker recipe below, deterministic transforms, no AMP/compilation/streaming/weighted sampling or dropped frames; runtime checks reject unsupported accumulation or skipped updates
 - **AND** changing native evaluation cadence explicitly changes future RNG consumption; interrupted/uninterrupted equivalence comparisons use matching evaluation cadence.
 
 #### Scenario: Approval or GPU ownership is unavailable
@@ -161,6 +161,15 @@ The lane SHALL choose the next safe valuable outcome using code/tests, current a
 - **THEN** the native continuation adapter consumes that already admitted receipt, including the pending form, without requiring a second finalized-only receipt read
 - **AND** saved configuration may point to the same output's earlier native checkpoint while original parent lineage, committed cursor, schedule and normalization are revalidated; another output's source is rejected
 - **AND** this explicit recovery does not infer process liveness or issue authority; automatic delegated-request recovery still refuses pending publication.
+
+#### Scenario: Deterministic persistent four-worker continuation retains policy RNG history
+- **WHEN** an admitted deterministic map-style native parent uses four workers, prefetch factor four, persistent workers and spawn, with the existing one-process/no-AMP continuation constraints
+- **THEN** continuation inherits that recipe and consumes the committed native sampler cursor, independent of prefetched rows, including an uneven final batch and repeated resumes
+- **AND** recreated TRAIN workers and previously started EVAL workers use a separate worker-seeding generator so their recreation does not consume additional policy CPU RNG; the first-ever EVAL iterator retains its ordinary seed draw
+- **AND** the v2 continuation sidecar and bound receipt retain whether persistent EVAL iteration already occurred, validated against inherited history and native evaluation-before-save timing even if future evaluation cadence changes
+- **AND** native optimizer moments, scheduled LR prefix, saved processors and immutable parent bindings remain authoritative; workers0 v1 continuation, legacy recovery and explicit warm-start contracts remain supported
+- **AND** unsaved worker RNG, processes and prefetch queues are not claimed restored: deterministic worker outputs and the native seed/epoch sampler make those details irrelevant to this scoped training sequence
+- **AND** focused CPU fixtures compare clean uninterrupted and repeated native resumes including TRAIN/EVAL recreation; their exact numerical agreement is test evidence, not a generic hardware-bitwise admission requirement or permission for actual training.
 
 #### Scenario: A learning result suggests different data or physical testing
 - **WHEN** the next outcome crosses Curator or Rollout ownership

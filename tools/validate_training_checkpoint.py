@@ -62,7 +62,13 @@ def continuation_checkpoint_state(policy: Path, receipt: dict) -> dict:
             or type(scheduler_state.get("last_epoch")) is not int or scheduler_state["last_epoch"] != step
             or scheduler_state.get("_last_lr") != [group.get("lr") for group in groups]):
         raise ValueError("continuation optimizer/scheduler position differs from native step")
-    if (saved["policy"].get("type") != "smolvla" or saved.get("num_workers") != 0
+    workers = saved.get("num_workers")
+    persistent = (type(workers) is int and workers == 4
+                  and saved.get("prefetch_factor") == 4
+                  and saved.get("persistent_workers") is True
+                  and saved.get("dataloader_multiprocessing_context") == "spawn")
+    if (saved["policy"].get("type") != "smolvla"
+            or not (type(workers) is int and workers == 0 or persistent)
             or saved["policy"].get("use_amp") is not False
             or saved["policy"].get("compile_model", False)
             or saved["policy"].get("drop_n_last_frames", 0) != 0
@@ -71,7 +77,8 @@ def continuation_checkpoint_state(policy: Path, receipt: dict) -> dict:
             or saved.get("sample_weighting") is not None or saved.get("env") is not None
             or saved.get("reward_model") is not None or saved.get("peft") is not None
             or saved.get("scheduler", {}).get("type") != "cosine_decay_with_warmup"):
-        raise ValueError("continuation supports only native SmolVLA world1/workers0/noAMP/deterministic transforms")
+        raise ValueError("continuation requires native SmolVLA world1/noAMP/deterministic transforms "
+                         "and workers0 or workers4/prefetch4/persistent/spawn")
     size = receipt["normalization"]["stats"]["action"]["count"][0]
     if isinstance(size, bool) or not isinstance(size, (int, float)) or size < 1 or int(size) != size:
         raise ValueError("continuation requires exact TRAIN frame count")
@@ -99,8 +106,17 @@ def continuation_checkpoint_state(policy: Path, receipt: dict) -> dict:
         state = load_json_strict(policy.parent / "training_state" / CONTINUATION_STATE)
         import math
         expected_cursor = advance_sample_cursor(initial["cursor"], step - initial["step"], batch)
-        if (set(state) != {"schema_version", "step", "cursor", "schedule", "python_gauss", "numpy_gauss"}
-                or state["schema_version"] != "fr5-native-continuation-state-v1"
+        keys = {"schema_version", "step", "cursor", "schedule", "python_gauss", "numpy_gauss"}
+        if persistent:
+            keys.add("persistent_eval_started")
+            frequency = saved.get("eval_steps", 0)
+            evaluated = bool(saved["dataset"].get("eval_split", 0) > 0 and frequency > 0
+                             and step // frequency > initial["step"] // frequency)
+        if (set(state) != keys
+                or state["schema_version"] != f"fr5-native-continuation-state-v{2 if persistent else 1}"
+                or (persistent and (type(initial.get("persistent_eval_started")) is not bool
+                    or type(state.get("persistent_eval_started")) is not bool
+                    or state["persistent_eval_started"] != (initial["persistent_eval_started"] or evaluated)))
                 or type(state["step"]) is not int or state["step"] != step
                 or any(type(state["cursor"].get(key)) is not int for key in expected_cursor)
                 or state["cursor"] != expected_cursor or state["cursor"]["num_frames"] != int(size)
@@ -116,9 +132,14 @@ def continuation_checkpoint_state(policy: Path, receipt: dict) -> dict:
     if saved.get("resume", False) or (policy.parent / "training_state" / CONTINUATION_STATE).exists():
         raise ValueError("legacy resumed sample history is not reconstructible")
     cursor = advance_sample_cursor({"num_frames": int(size), "epoch": 0, "offset": 0}, step, batch)
-    return {"schema_version": "fr5-native-continuation-state-v1", "step": step, "cursor": cursor,
+    state = {"schema_version": "fr5-native-continuation-state-v1", "step": step, "cursor": cursor,
             "schedule": {"native_horizon": saved["steps"], "hold_from_step": None},
             "python_gauss": None, "numpy_gauss": None}
+    if persistent:
+        state.update(schema_version="fr5-native-continuation-state-v2",
+                     persistent_eval_started=bool(saved["dataset"].get("eval_split", 0) > 0
+                         and saved.get("eval_steps", 0) > 0 and step >= saved["eval_steps"]))
+    return state
 
 
 def continuation_argv(parent: Path, parent_receipt: dict, *, output: Path, steps: int,
@@ -164,8 +185,10 @@ def continuation_binding(value: Path, split: dict, normalization: dict, argv: li
     schedule = dict(state["schedule"])
     if mode == "hold" and schedule["hold_from_step"] is None:
         schedule["hold_from_step"] = state["step"]
-    return {**binding, "mode": "continuation", "reset": [], "step": state["step"],
-            "cursor": state["cursor"], "schedule": schedule}
+    binding.update(mode="continuation", reset=[], step=state["step"], cursor=state["cursor"], schedule=schedule)
+    if "persistent_eval_started" in state:
+        binding["persistent_eval_started"] = state["persistent_eval_started"]
+    return binding
 
 
 def warm_start_binding(value: Path, split: dict, normalization: dict) -> dict:
