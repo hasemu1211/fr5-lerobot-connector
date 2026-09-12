@@ -12,6 +12,7 @@ from tools.data_factory.collection_recommendation_io import recommend_stored_col
 from tools.data_factory.operator.catalog import (
     project_direct_poses, project_balanced_start_pose_ids,
     selected_state_space_design_profile, validate_operator_pose,
+    resolve_workspace_cycle_selections, validate_yaw_preserving_transitions,
 )
 from tools.data_factory.collection_seed import derive_domain_seed
 from tools.fr5_data_factory import ContractError, canonical_digest, load_json_strict
@@ -77,13 +78,23 @@ def derive_next_draft(source, *, catalog, selection, draft, paired, expected_rec
             candidate = copy.deepcopy(draft)
             if advice["sampling"]["authoring_mode"] == "DIRECT_EDIT":
                 poses = advice["object_poses"]
-                if (selection["task_id"] != "pickup_e2e"
-                        or project_direct_poses(catalog, selection, poses[0], poses[1:], len(poses)) != poses):
+                if selection["task_id"] == "pick_place":
+                    if not paired or len(poses) != draft["requested_count"] + 1:
+                        raise ContractError("COLLECTION_ADVICE_SEQUENCE_NOT_REPRESENTABLE")
+                    route = resolve_workspace_cycle_selections(catalog, selection, draft["requested_count"])
+                    if [validate_operator_pose(catalog, endpoint, pose)
+                            for endpoint, pose in zip(route, poses)] != poses:
+                        raise ContractError("COLLECTION_ADVICE_SEQUENCE_NOT_REPRESENTABLE")
+                    validate_yaw_preserving_transitions(catalog, route, poses)
+                elif project_direct_poses(catalog, selection, poses[0], poses[1:], len(poses)) != poses:
                     raise ContractError("COLLECTION_ADVICE_SEQUENCE_NOT_REPRESENTABLE")
                 candidate.update(authoring_mode="DIRECT_EDIT", direct_poses=copy.deepcopy(poses[1:]))
                 if paired:
-                    starts = project_balanced_start_pose_ids(draft["selected_start_pose_ids"], len(poses),
+                    starts = project_balanced_start_pose_ids(draft["selected_start_pose_ids"], draft["requested_count"],
                         normalized_seed=derive_domain_seed(draft["normalized_seed"], "start_pose"))
+                    if selection["task_id"] == "pick_place":
+                        starts.append(None)
+                        candidate["direct_poses"] = []
                     candidate["direct_pairs"] = [{**pose, "start_pose_id": start} for pose, start in zip(poses, starts)]
                 candidate["revision"] += 1
             result.update(status="READY", reason_codes=[], mode="ACQUISITION",

@@ -405,7 +405,11 @@ def _resolve_physical_pose_domain(
         ):
             raise ContractError("PHYSICAL_CONSOLE_EXACT_SCOPE")
         seen.add(key)
-        result.append(resolved)
+        # The campaign resolver schema describes each source condition. The
+        # runtime-only destination receipt is retained again at live resolution.
+        source_resolved = copy.deepcopy(resolved)
+        source_resolved.pop("destination_resolved_inputs", None)
+        result.append(source_resolved)
     return result
 
 

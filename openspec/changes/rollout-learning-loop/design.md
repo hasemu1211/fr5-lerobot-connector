@@ -250,3 +250,28 @@ compare task success, completion time and completed tasks within a fixed time
 window. Those are useful complementary outcome measurements, not FR5 admission
 thresholds. Until real FR5 outcomes exist, the relationship between offline
 action error and task success remains unmeasured here.
+
+
+## Original-transition recollection (software integration)
+
+The existing acquisition recommendation joins a human-reviewed finite learned
+chunk to its original native v4 source program, preapproval resolver receipts,
+and episode instruction binding. Retain the destination resolver receipt in the
+existing preapproval producer: job metadata participates in its resolved digest,
+so reconstructing it from the source job would guess historical inputs. Validate
+both endpoint poses, sheets, calibration, family/region identities, object/grasp,
+cameras, direction and selected motion preset against the current native catalog.
+Missing historical destination or language evidence remains explicitly unavailable.
+
+Use the existing paired DIRECT_EDIT workspace cycle for the exact directed pair.
+Current Scene owns the first pose only. If recovery changed that pose within the
+source workspace, reserve the next two native cycle edges to return to the original
+source, then propose its original destination; reject insufficient caller budget or
+unsafe native yaw transitions. Original releases that change yaw are explicitly
+unsupported by this yaw-preserving Collection authoring path; never substitute a
+next-source yaw reset for the original destination. A different current workspace requires qualified
+reposition/selection by the existing operator, not a rewritten failure condition.
+The normal advice choice re-reads evidence and the normal compiler consumes the
+same paired draft. No semantic classification, Scene writes, execution, data
+mutation or approval authority is added. A failed finite chunk remains a reviewed
+re-demonstration hypothesis with unknown complete-task effect and data deficit.

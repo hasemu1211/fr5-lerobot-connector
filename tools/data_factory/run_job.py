@@ -762,6 +762,13 @@ def resolve_inputs(
             approach_sampling_profile=approach_sampling_profile,
             **design,
         )
+    if destination_validated is not None:
+        validated = copy.deepcopy(validated)
+        validated["destination_resolved_inputs"] = {
+            key: copy.deepcopy(destination_validated[key]) for key in (
+                "normalized_job", "input_digests", "resolved_job_digest",
+            )
+        }
     return validated, program, scene_binding_call(validated, release_pose, payload["run_id"])
 
 
@@ -1664,6 +1671,25 @@ def _write_preapproval_evidence(
         ):
             raise ContractError("PREAPPROVAL_RESOLVED_INPUTS")
         evidence["resolved_inputs"] = resolved
+        source_program = plan.get("learned_source_program")
+        if isinstance(source_program, Mapping) and source_program.get("schema_version") == "fr5.motion_program.v4":
+            destination = validated.get("destination_resolved_inputs")
+            if (
+                not isinstance(destination, Mapping)
+                or set(destination) != {"normalized_job", "input_digests", "resolved_job_digest"}
+                or not isinstance(destination["normalized_job"], Mapping)
+                or not isinstance(destination["input_digests"], Mapping)
+                or set(destination["input_digests"]) != set(resolved["input_digests"])
+                or canonical_digest({"job": destination["normalized_job"],
+                                     "input_digests": destination["input_digests"]})
+                != destination["resolved_job_digest"]
+                or destination["resolved_job_digest"] != source_program.get("destination_resolved_job_digest")
+                or not isinstance(source_program.get("destination_binding_digests"), Mapping)
+                or any(source_program["destination_binding_digests"].get(key) != value
+                       for key, value in destination["input_digests"].items())
+            ):
+                raise ContractError("PREAPPROVAL_DESTINATION_RESOLVED_INPUTS")
+            evidence["destination_resolved_inputs"] = copy.deepcopy(dict(destination))
     if episode_instruction_binding is not None:
         checked_instruction = validate_episode_instruction_binding(
             episode_instruction_binding,

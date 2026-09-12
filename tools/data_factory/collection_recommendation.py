@@ -1225,6 +1225,87 @@ __all__ = [
 ACQUISITION_SCHEMA = "data_factory.collection_recommendation.v2"
 
 
+def _rollout_transition(context, selected, plans, preapproval, source_job, program, motion_preset):
+    """Join original resolver and language endpoints to the current native domain."""
+    from datetime import datetime, timezone
+    from tools.data_factory.operator.catalog import resolve_workspace_cycle_selections
+    from tools.data_factory.quality.coverage_report import RESOLVED_INPUT_DIGEST_FIELDS
+    from tools.data_factory.task_recipe import validate_episode_instruction_binding
+    from tools.fr5_data_factory import normalize_job_spec
+
+    if program["schema_version"] != "fr5.motion_program.v4":
+        raise ContractError("COLLECTION_ACQUISITION_ROLLOUT_TRANSITION_SOURCE_REQUIRED")
+    receipt = _exact(preapproval.get("destination_resolved_inputs"), frozenset({
+        "normalized_job", "input_digests", "resolved_job_digest",
+    }), "COLLECTION_ACQUISITION_ROLLOUT_DESTINATION_REQUIRED")
+    destination_job = normalize_job_spec(receipt["normalized_job"], now=datetime.min.replace(tzinfo=timezone.utc))
+    inputs = _exact(receipt["input_digests"], frozenset(RESOLVED_INPUT_DIGEST_FIELDS),
+                    "COLLECTION_ACQUISITION_ROLLOUT_DESTINATION_BINDING")
+    if (destination_job != receipt["normalized_job"]
+            or canonical_digest({"job": destination_job, "input_digests": inputs}) != receipt["resolved_job_digest"]
+            or receipt["resolved_job_digest"] != program["destination_resolved_job_digest"]
+            or any(program["destination_binding_digests"].get(k) != v for k, v in inputs.items())):
+        raise ContractError("COLLECTION_ACQUISITION_ROLLOUT_DESTINATION_BINDING")
+    instruction = validate_episode_instruction_binding(preapproval.get("episode_instruction_binding"))
+    if (preapproval.get("episode_instruction_binding_digest") != instruction["binding_digest"]
+            or instruction["task_binding"]["task_id"] != "pick_place"
+            or instruction["object_profile_id"] != selected["object_id"]
+            or instruction["object_profile_digest"] != program["binding_digests"]["object_profile"]
+            or any(p["learned_proposal"]["instruction"] != instruction["instruction"] for p in plans)):
+        raise ContractError("COLLECTION_ACQUISITION_ROLLOUT_INSTRUCTION_BINDING")
+    for plan in plans:
+        release = plan.get("scene_binding", {}).get("release_slot")
+        if (not isinstance(release, Mapping)
+                or release.get("pose") != instruction["task_binding"]["spatial_bindings"][1]["pose"]):
+            raise ContractError("COLLECTION_ACQUISITION_ROLLOUT_DESTINATION_BINDING")
+    cycle = resolve_workspace_cycle_selections(context["catalog"], selected, 1, require_executable=False)
+    for endpoint, job, bindings, selection in zip(
+        instruction["task_binding"]["spatial_bindings"], (source_job, destination_job),
+        (program["binding_digests"], program["destination_binding_digests"]), cycle,
+    ):
+        combo = next(c for c in context["catalog"]["combinations"]
+                     if c["combination_digest"] == selection["combination_digest"])
+        domains = [d for d in context["catalog"]["workspace_domains"] if
+                   (d["workspace_id"], d["frame_id"], d["object_id"]) ==
+                   (selection["workspace_id"], selection["frame_id"], selection["object_id"])]
+        if len(domains) != 1:
+            raise ContractError("COLLECTION_ACQUISITION_ROLLOUT_ENDPOINT_BINDING")
+        domain = domains[0]
+        expected_motion = (combo["source_digests"]["motion"] if motion_preset is None else
+                           motion_preset["qualifications"][selection["motion_id"]])
+        expected_endpoint = {"workspace_id": selection["workspace_id"],
+            "cell_calibration_id": selection["frame_id"],
+            "cell_calibration_digest": combo["source_digests"]["cell"], "motion_recipe_digest": expected_motion}
+        if (expected_endpoint not in program["endpoint_bindings"]
+                or endpoint["workspace_id"] != job["place_id"] or endpoint["workspace_id"] != selection["workspace_id"]
+                or endpoint["frame_id"] != job["cell_calibration_id"] or endpoint["frame_id"] != selection["frame_id"]
+                or endpoint["pose"] != {k: job[k] for k in ("place_id", "yaw_deg", "x_mm", "y_mm")}
+                or endpoint["sheet_digest"] != job["sheet_manifest_digest"]
+                or endpoint["sheet_digest"] != bindings["selected_sheet"]
+                or endpoint["family_digest"] != domain["a4_family_digest"]
+                or endpoint["region_binding"] != {k: domain["coverage_region"][k] for k in endpoint["region_binding"]}
+                or bindings["yaw0_sheet"] != domain["yaw0_manifest_digest"]
+                or any(bindings[k] != combo["source_digests"][name] for k, name in {
+                    "selected_sheet": "selected_sheet", "yaw0_sheet": "yaw0_sheet", "cell_calibration": "cell",
+                    "object_profile": "object", "grasp_profile": "grasp", "collection_profile": "camera_profile",
+                }.items())
+                or bindings["motion_qualification"] != expected_motion
+                or bindings.get("motion_preset") != (None if motion_preset is None else motion_preset["digest"])
+                or "motion_preset_trial" in bindings
+                or any(job[k] != source_job[k] for k in (
+                    "task", "robot_system_id", "object_profile_id", "grasp_profile_id", "collection_profile_id",
+                    "instruction", "episode_intent"))):
+            raise ContractError("COLLECTION_ACQUISITION_ROLLOUT_ENDPOINT_BINDING")
+    if destination_job["yaw_deg"] != source_job["yaw_deg"]:
+        # Native Collection records a yaw-preserving release, then optionally
+        # repositions for the next source. That is not a rotated failed release.
+        raise ContractError("COLLECTION_ACQUISITION_ROLLOUT_DESTINATION_YAW_UNSUPPORTED")
+    return {"destination": copy.deepcopy(instruction["task_binding"]["spatial_bindings"][1]["pose"]),
+            "episode_instruction_binding": instruction,
+            "destination_resolved_job_digest": receipt["resolved_job_digest"],
+            "endpoint_bindings": copy.deepcopy(program["endpoint_bindings"])}
+
+
 def _current_rollout_condition(context, selected, lifecycle_result, preapproval, motion_preset=None):
     """Bind a reviewed finite chunk to its original native source condition.
 
@@ -1254,6 +1335,9 @@ def _current_rollout_condition(context, selected, lifecycle_result, preapproval,
             or preapproval.get("plan_digest") != canonical_digest(envelope["plan"])
             or preapproval.get("run_id") != diagnostic["run_id"]):
         raise ContractError("COLLECTION_ACQUISITION_ROLLOUT_SOURCE_BINDING")
+    original_binding = validate_scene_binding(envelope["plan"].get("scene_binding"))
+    if original_binding["object_instance_id"] != binding["object_instance_id"]:
+        raise ContractError("COLLECTION_ACQUISITION_ROLLOUT_OBJECT_MISMATCH")
     receipt = _exact(preapproval.get("resolved_inputs"), frozenset({
         "normalized_job", "input_digests", "resolved_job_digest",
     }), "COLLECTION_ACQUISITION_ROLLOUT_SOURCE_REQUIRED")
@@ -1267,12 +1351,12 @@ def _current_rollout_condition(context, selected, lifecycle_result, preapproval,
             or preapproval.get("resolved_job_digest") != receipt["resolved_job_digest"]
             or any(program["binding_digests"].get(key) != value for key, value in inputs.items())):
         raise ContractError("COLLECTION_ACQUISITION_ROLLOUT_SOURCE_BINDING")
+    if selected["task_id"] == "pick_place" and job["place_id"] != selected["workspace_id"]:
+        raise ContractError("COLLECTION_ACQUISITION_ROLLOUT_SOURCE_REPOSITION_REQUIRED")
     combination = next(item for item in context["catalog"]["combinations"]
                        if item["combination_digest"] == selected["combination_digest"])
-    # A finite chunk's source alone does not bind a pick/place destination or
-    # transition. Preserve ordinary pick/place acquisition without targeting it.
-    if selected["task_id"] != "pickup_e2e":
-        raise ContractError("COLLECTION_ACQUISITION_ROLLOUT_TRANSITION_UNSUPPORTED")
+    transition = (_rollout_transition(context, selected, plans, preapproval, job, program, motion_preset)
+                  if selected["task_id"] == "pick_place" else {})
     required = {"cell_calibration": "cell", "object_profile": "object", "grasp_profile": "grasp",
                 "collection_profile": "camera_profile", "motion_qualification": "motion"}
     expected_digests = dict(combination["source_digests"])
@@ -1298,10 +1382,11 @@ def _current_rollout_condition(context, selected, lifecycle_result, preapproval,
     if not _human_failed_chunk(lifecycle_result):
         raise ContractError("COLLECTION_ACQUISITION_ROLLOUT_REDEMONSTRATION_UNPROVEN")
     return diagnostic, {
+        **transition,
         "resolved_job_digest": program["resolved_job_digest"], "task_id": selected["task_id"],
         "source": {key: job[key] for key in ("place_id", "yaw_deg", "x_mm", "y_mm")},
         "preapproval_evidence_digest": canonical_digest(preapproval),
-        "original_scene_binding": binding, "source_plan_digest": preapproval["plan_digest"],
+        "original_scene_binding": original_binding, "source_plan_digest": preapproval["plan_digest"],
         "review_scope": "FINITE_LEARNED_CHUNK",
         "suggestion": "REDEMONSTRATE_CONDITION", "reason_code": "HUMAN_REVIEWED_CHUNK_FAILURE",
         "task_effectiveness": "UNKNOWN", "data_deficit": "UNKNOWN",
@@ -1321,7 +1406,7 @@ def _derive_acquisition_recommendation(*, acquisition, episode_evidence, source_
         validate_operator_selection, project_assisted_poses, project_direct_poses,
         project_workspace_cycle_poses, resolve_workspace_cycle_selections,
         project_yaw_sample_bindings, project_state_space_cells,
-        selected_motion_preset,
+        selected_motion_preset, validate_operator_pose, validate_yaw_preserving_transitions,
     )
     from tools.data_factory.scene_state import _validate as validate_scene
 
@@ -1349,6 +1434,10 @@ def _derive_acquisition_recommendation(*, acquisition, episode_evidence, source_
         raise ContractError("COLLECTION_ACQUISITION_SCENE")
     scene = validate_scene(scene, scene.get("robot_system_id"))
     instance = scene["objects"].get(context["object_instance_id"])
+    if (rollout_lifecycle_result is not None and task == "pick_place"
+            and instance is not None and instance["state"] == "ON_SURFACE"
+            and instance["pose"]["place_id"] != selected["workspace_id"]):
+        raise ContractError("COLLECTION_ACQUISITION_ROLLOUT_SOURCE_REPOSITION_REQUIRED")
     if (instance is None or instance["state"] != "ON_SURFACE"
             or instance["object_profile_id"] != selected["object_id"]
             or instance["pose"]["place_id"] != selected["workspace_id"]):
@@ -1450,7 +1539,19 @@ def _derive_acquisition_recommendation(*, acquisition, episode_evidence, source_
     poses = projector(catalog, selected, source_pose, count, repeat=repeat,
                       normalized_seed=spatial_seed, yaw_sampling_seed=yaw_seed)
     authoring_mode = "ASSISTED"
-    if rollout is not None and rollout[1]["source"] not in poses[:count]:
+    if rollout is not None and task == "pick_place":
+        target = rollout[1]
+        # The cycle keeps current placement first. When recovery moved the
+        # object, two native transitions return to the original source before
+        # replaying the original directed pair; no Scene declaration is made.
+        index = 0 if source_pose == target["source"] else 2
+        if count <= index:
+            raise ContractError("COLLECTION_ACQUISITION_ROLLOUT_BUDGET_INSUFFICIENT")
+        poses[index:index + 2] = [copy.deepcopy(target["source"]), copy.deepcopy(target["destination"])]
+        poses = [validate_operator_pose(catalog, endpoint, pose) for endpoint, pose in zip(cycle, poses)]
+        validate_yaw_preserving_transitions(catalog, cycle, poses)
+        authoring_mode = "DIRECT_EDIT"
+    elif rollout is not None and rollout[1]["source"] not in poses[:count]:
         # Recovery can change the current pose. Preserve that first condition,
         # then reuse native direct authoring for the original reviewed source;
         # neither a lucky random sample nor resetting scene history is needed.
@@ -1488,7 +1589,8 @@ def _derive_acquisition_recommendation(*, acquisition, episode_evidence, source_
         snapshot["motion_preset"] = motion_preset
     if rollout is not None:
         diagnostic, target = rollout
-        target["condition_indices"] = [item["order_index"] for item in conditions if item["source"] == target["source"]]
+        target["condition_indices"] = [item["order_index"] for item in conditions if item["source"] == target["source"]
+                                       and (task != "pick_place" or item["destination"] == target["destination"])]
         if not target["condition_indices"]:
             raise ContractError("COLLECTION_ACQUISITION_ROLLOUT_CONDITION_NOT_PROPOSED")
         snapshot.update(rollout_evidence_analysis_ref={
@@ -1516,9 +1618,10 @@ def _derive_acquisition_recommendation(*, acquisition, episode_evidence, source_
         "authority": copy.deepcopy(AUTHORITY),
     }
     if rollout is not None:
-        recommendation["reason_codes"].extend(["HUMAN_REVIEWED_CHUNK_FAILURE", "REDEMONSTRATE_ORIGINAL_SOURCE"])
+        recommendation["reason_codes"].extend(["HUMAN_REVIEWED_CHUNK_FAILURE",
+            "REDEMONSTRATE_ORIGINAL_TRANSITION" if task == "pick_place" else "REDEMONSTRATE_ORIGINAL_SOURCE"])
         recommendation["limitations"].append(
-            "The original source condition is a human-reviewed chunk re-demonstration hypothesis; "
+            "The original condition is a human-reviewed chunk re-demonstration hypothesis; "
             "task effectiveness and causal data deficit remain unknown."
         )
         if authoring_mode == "DIRECT_EDIT":
@@ -1528,8 +1631,9 @@ def _derive_acquisition_recommendation(*, acquisition, episode_evidence, source_
                 "Remaining sampled coverage is not an optimized missing-condition selector or fitted utility ranking."
             )
             recommendation["limitations"].append(
-                "Native direct authoring preserves the current first pose and inserts the original pose within budget; "
-                "remaining unique sampled poses may be truncated. Direct conditions have no stochastic yaw binding."
+                "Native direct authoring preserves current placement and the original condition within budget. "
+                "Intervening cycle transitions and any next-source reposition remain subject to native qualification. "
+                "Direct conditions have no stochastic yaw binding."
             )
     recommendation["recommendation_digest"] = canonical_digest(recommendation)
     return analysis, recommendation

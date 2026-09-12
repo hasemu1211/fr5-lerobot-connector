@@ -83,6 +83,199 @@ class AcquisitionAdviceTests(unittest.TestCase):
         self.assertEqual(advice["status"], "READY", advice)
         return advice
 
+    def transition_rollout(self, original_index=0):
+        """Actual native resolver/program/language producers, synthetic learned review."""
+        from tools.data_factory import run_job
+        from tools.data_factory.rollout.finite_plan import compile_program
+        from tools.data_factory.scene_state import release_slot
+        captured = []
+        resolve = run_job.resolve_inputs
+        def retain(*args, **kwargs):
+            result = resolve(*args, **kwargs)
+            captured.append(copy.deepcopy(result))
+            return result
+        seed = self.application("transition-source")
+        self.send(seed, "update_draft", {"draft_id": seed.draft["draft_id"], "selection": {"variant": "DIRECT"}})
+        if original_index:
+            self.send(seed, "update_draft", {"draft_id": seed.draft["draft_id"], "requested_count": original_index + 2})
+        with mock.patch.object(run_job, "resolve_inputs", side_effect=retain):
+            self.send(seed, "compile_draft", {"draft_id": seed.draft["draft_id"], "data_disposition": "PRODUCTION"})
+        fixture, runs = self.store_evidence(seed, "transition-evidence")
+        instruction = copy.deepcopy(seed._campaign._episode_instruction_bindings[original_index])
+        source_pose, destination = [e["pose"] for e in instruction["task_binding"]["spatial_bindings"]]
+        resolved, source, _ = next(item for item in captured if
+            {k: item[0]["normalized_job"][k] for k in source_pose} == source_pose
+            and item[1]["schema_version"] == "fr5.motion_program.v4")
+        order = next(i for i, b in enumerate(fixture.hypothesis["base_conditions"])
+                     if b["resolved_job_digest"] == resolved["resolved_job_digest"])
+        lifecycle = evidence_fixture.learned_lifecycle(fixture, order=order, reviewed=True)
+        plan = lifecycle["plan_envelope"]["plan"]
+        proposal = plan["learned_proposal"]
+        # Synthetic CPU proposal uses its own explicit test URDF; both native
+        # endpoint pins retain the same description identity required by v4.
+        xml_digest = plan["binding_digests"]["robot_description_digest"]
+        for bindings in (source["binding_digests"], source["destination_binding_digests"]):
+            bindings["robot_description_digest"] = xml_digest
+        proposal["instruction"] = instruction["instruction"]
+        evidence_fixture.redigest(proposal, "proposal_digest")
+        program = compile_program(source, proposal)
+        plan.update(learned_source_program=source, binding_digests=copy.deepcopy(source["binding_digests"]),
+                    steps=program["steps"], motion_program_digest=canonical_digest(program))
+        plan["scene_binding"] = {"scene_state_digest": canonical_digest("original-transition-scene"),
+            "revision": 1, "object_instance_id": "cube", "release_slot": release_slot(
+                robot_system_id=plan["robot_system_id"], pose=destination,
+                object_profile_id=instruction["object_profile_id"],
+                exclusion_geometry_digest=canonical_digest({"shape": "BOX", "dimensions_mm": [24., 24., 24.]}))}
+        lifecycle["scene_binding"] = copy.deepcopy(plan["scene_binding"])
+        lifecycle["execution_evidence"]["learned_execution"]["proposal_digest"] = proposal["proposal_digest"]
+        evidence_fixture.AcquisitionRolloutTests.rebind(lifecycle)
+        receipt = {k: copy.deepcopy(resolved[k]) for k in ("normalized_job", "input_digests", "resolved_job_digest")}
+        preapproval = {"schema_version": "data_factory.preapproval_evidence.v4", "run_id": lifecycle["run_id"],
+            "plan_digest": lifecycle["plan_digest"], "resolved_job_digest": resolved["resolved_job_digest"],
+            "plan_envelope": copy.deepcopy(lifecycle["plan_envelope"]),
+            "plan_envelope_digest": canonical_digest(lifecycle["plan_envelope"]),
+            "resolved_inputs": receipt, "destination_resolved_inputs": resolved["destination_resolved_inputs"],
+            "episode_instruction_binding": instruction, "episode_instruction_binding_digest": instruction["binding_digest"]}
+        root = self.root / "transition-rollout"
+        root.mkdir()
+        path = root / "learned_lifecycle_result.json"
+        path.write_text(json.dumps(lifecycle))
+        (root / "preapproval_evidence.json").write_text(json.dumps(preapproval))
+        context = {"run_directories": runs, "scene_state_path": self.source["scene_state_path"],
+                   "rollout_lifecycle_path": str(path)}
+        self.app = self.application("transition-consumer", source=lambda: context, rollout=path)
+        self.send(self.app, "update_draft", {"draft_id": self.app.draft["draft_id"], "selection": {"variant": "DIRECT"}})
+        return lifecycle, preapproval, context
+
+    def test_original_transition_roundtrips_native_paired_draft_and_compile(self):
+        lifecycle, preapproval, context = self.transition_rollout()
+        before = {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+        advice = self.refresh()
+        recommendation = copy.deepcopy(self.app._collection_advice["recommendation"])
+        target = recommendation["input_snapshot"]["rollout_condition"]
+        self.assertEqual(target["condition_indices"], [0])
+        self.assertEqual(target["episode_instruction_binding"], preapproval["episode_instruction_binding"])
+        self.assertEqual(recommendation["conditions"][0]["destination"], target["destination"])
+        from tools.data_factory.collection_recommendation_io import _acquisition_context, _load_run
+        from tools.data_factory.collection_recommendation import validate_collection_recommendation
+        acquisition = {"catalog": self.app.catalog, "selection": self.app.selection,
+            "scene_state_path": context["scene_state_path"],
+            "expected_scene_digest": self.app.draft["object_position"]["scene_state_digest"], "object_instance_id": "cube",
+            **{k: self.app.draft[k] for k in ("requested_count", "repeat", "normalized_seed", "motion_preset")}}
+        args = dict(acquisition=_acquisition_context(acquisition), episode_evidence=[_load_run(r)[0] for r in context["run_directories"]],
+                    rollout_evidence_analysis=lifecycle, rollout_preapproval_evidence=preapproval)
+        self.assertEqual(validate_collection_recommendation(recommendation, **args), recommendation)
+        forged = copy.deepcopy(recommendation)
+        forged["conditions"][0]["destination"]["x_mm"] += 1
+        evidence_fixture.redigest(forged, "recommendation_digest")
+        with self.assertRaisesRegex(ContractError, "INPUT_CHANGED"):
+            validate_collection_recommendation(forged, **args)
+        self.send(self.app, "choose_collection_advice", {"choice": "APPLY", "expected_recommendation_digest": advice["recommendation_digest"]})
+        self.assertEqual(self.app.draft["authoring_mode"], "DIRECT_EDIT")
+        self.assertIsNone(self.app.draft["direct_pairs"][-1]["start_pose_id"])
+        self.assertEqual(self.app.projection()["collection_advice"]["status"], "APPLIED")
+        self.assertEqual({p: p.read_bytes() for p in before}, before)
+        self.send(self.app, "compile_draft", {"draft_id": self.app.draft["draft_id"], "data_disposition": "PRODUCTION"})
+        self.assertEqual(self.app._campaign._episode_instruction_bindings[0], preapproval["episode_instruction_binding"])
+        self.assertIsNone(self.app.projection()["campaign_authorization"])
+        self.native.forbidden.assert_not_called()
+
+    def test_recovered_transition_keeps_current_pose_then_original_pair(self):
+        lifecycle, preapproval, context = self.transition_rollout(original_index=2)
+        scene_path = Path(context["scene_state_path"])
+        current = copy.deepcopy(load_json_strict(scene_path)["objects"]["cube"]["pose"])
+        self.send(self.app, "refresh_collection_advice")
+        self.assertEqual(self.app._collection_advice["reason_codes"], ["COLLECTION_ACQUISITION_ROLLOUT_BUDGET_INSUFFICIENT"])
+        self.send(self.app, "update_draft", {"draft_id": self.app.draft["draft_id"], "requested_count": 4})
+        advice = self.refresh()
+        target = advice["recommendation"]["input_snapshot"]["rollout_condition"]
+        self.assertEqual(target["condition_indices"], [2])
+        poses = advice["recommendation"]["object_poses"]
+        self.assertEqual(poses[0], current)
+        self.assertEqual(poses[2:4], [target["source"], target["destination"]])
+        self.assertNotEqual(poses[0], poses[2])
+        self.assertEqual(target["original_scene_binding"], preapproval["plan_envelope"]["plan"]["scene_binding"])
+        # The existing update_draft pair intents can represent these exact N+1
+        # poses, including the terminal destination's absent start pose.
+        self.send(self.app, "update_draft", {"draft_id": self.app.draft["draft_id"], "authoring_mode": "DIRECT_EDIT"})
+        for pair in list(reversed(self.app.draft["direct_pairs"][1:])):
+            self.send(self.app, "update_draft", {"draft_id": self.app.draft["draft_id"], "remove_pair": pair})
+        start = self.app.draft["selected_start_pose_ids"][0]
+        for index, pose in enumerate(poses[1:], 1):
+            self.send(self.app, "update_draft", {"draft_id": self.app.draft["draft_id"],
+                "add_pair": {**pose, "start_pose_id": None if index == 4 else start}})
+        self.send(self.app, "compile_draft", {"draft_id": self.app.draft["draft_id"], "data_disposition": "PRODUCTION"})
+        self.assertEqual(self.app._campaign._episode_instruction_bindings[2], preapproval["episode_instruction_binding"])
+        self.assertEqual(load_json_strict(scene_path)["objects"]["cube"]["pose"], current)
+        self.assertIsNone(self.app.projection()["campaign_authorization"])
+        self.native.forbidden.assert_not_called()
+
+    def test_transition_missing_and_retargeted_original_evidence_rejects(self):
+        lifecycle, preapproval, context = self.transition_rollout()
+        path = Path(context["rollout_lifecycle_path"])
+        approval_path = path.with_name("preapproval_evidence.json")
+        cases = {}
+        missing = copy.deepcopy(preapproval); missing.pop("destination_resolved_inputs")
+        cases["missing-destination"] = missing
+        for field in ("x_mm", "y_mm", "yaw_deg", "cell_calibration_id", "sheet_manifest_digest"):
+            changed = copy.deepcopy(preapproval)
+            job = changed["destination_resolved_inputs"]["normalized_job"]
+            job[field] = job[field] + 1 if isinstance(job[field], (float, int)) else (
+                canonical_digest("changed") if field == "sheet_manifest_digest" else "changed")
+            receipt = changed["destination_resolved_inputs"]
+            receipt["resolved_job_digest"] = canonical_digest({"job": job, "input_digests": receipt["input_digests"]})
+            cases[field] = changed
+        changed = copy.deepcopy(preapproval)
+        changed["plan_envelope"]["plan"]["learned_proposal"]["checkpoint"]["tree_digest"] = canonical_digest("other")
+        changed["plan_envelope_digest"] = canonical_digest(changed["plan_envelope"])
+        cases["other-plan-checkpoint"] = changed
+        for endpoint_index in (0, 1):
+            for field in ("family_digest", "region_binding"):
+                changed = copy.deepcopy(preapproval)
+                language = changed["episode_instruction_binding"]
+                endpoint = language["task_binding"]["spatial_bindings"][endpoint_index]
+                if field == "family_digest":
+                    endpoint[field] = canonical_digest("different-family")
+                else:
+                    endpoint[field]["physical_binding_status"] = "NOT_CONFIGURED"
+                    endpoint[field].update(layout_id=None, layout_digest=None, region_id=None)
+                evidence_fixture.redigest(language["task_binding"], "binding_digest")
+                from tools.data_factory.task_recipe import task_binding_instruction
+                language["instruction"] = task_binding_instruction(language["task_binding"], language["object_description"])
+                evidence_fixture.redigest(language, "binding_digest")
+                changed["episode_instruction_binding_digest"] = language["binding_digest"]
+                cases[f"endpoint-{endpoint_index}-{field}"] = changed
+        changed = copy.deepcopy(preapproval)
+        language = changed["episode_instruction_binding"]
+        language["task_binding"]["spatial_bindings"].reverse()
+        for endpoint, role in zip(language["task_binding"]["spatial_bindings"], ("SOURCE", "DESTINATION")):
+            endpoint["role"] = role
+        evidence_fixture.redigest(language["task_binding"], "binding_digest")
+        language["instruction"] = task_binding_instruction(language["task_binding"], language["object_description"])
+        evidence_fixture.redigest(language, "binding_digest")
+        changed["episode_instruction_binding_digest"] = language["binding_digest"]
+        cases["reversed-direction"] = changed
+        changed = copy.deepcopy(preapproval)
+        language = changed["episode_instruction_binding"]
+        from tools.data_factory.task_recipe import compile_task_binding
+        language["task_binding"] = compile_task_binding("pickup_e2e", source=language["task_binding"]["spatial_bindings"][0])
+        language["instruction"] = task_binding_instruction(language["task_binding"], language["object_description"])
+        evidence_fixture.redigest(language, "binding_digest")
+        changed["episode_instruction_binding_digest"] = language["binding_digest"]
+        cases["different-task"] = changed
+        missing = copy.deepcopy(preapproval); missing.pop("episode_instruction_binding")
+        cases["missing-instruction"] = missing
+        draft = copy.deepcopy(self.app.draft)
+        for name, changed in cases.items():
+            with self.subTest(case=name):
+                approval_path.write_text(json.dumps(changed))
+                self.send(self.app, "refresh_collection_advice")
+                self.assertEqual(self.app._collection_advice["status"], "UNAVAILABLE")
+                self.assertEqual(self.app.draft, draft)
+        approval_path.write_text(json.dumps(preapproval))
+        self.refresh()
+        self.native.forbidden.assert_not_called()
+
     def test_original_rollout_condition_applies_and_compiles_after_recovery(self):
         # Existing physical composition and compiler, synthetic stored outcomes;
         # no device, model, motion, recorder or approval callback is available.

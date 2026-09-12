@@ -87,15 +87,50 @@ class Executor:
 
 class RunJobTest(unittest.TestCase):
     def test_learned_preapproval_retains_exact_original_resolver_inputs(self):
-        validated = runtime_validated(job={**JOB, "x_mm": 12.0, "y_mm": -8.0, "yaw_deg": 25.0})
+        validated = runtime_validated(job={**JOB, "x_mm": 12.0, "y_mm": -8.0, "yaw_deg": 25.0},
+                                      input_digests={"cell_calibration": run_job.canonical_digest("source-calibration")})
         original = copy.deepcopy(validated)
-        for mismatch in (None, "source", "plan"):
+        for mismatch in (None, "source", "plan", "destination", "destination_digest",
+                         "destination_inputs", "destination_missing", "destination_redigest", "destination_valid"):
             with self.subTest(mismatch=mismatch), tempfile.TemporaryDirectory() as directory:
                 request = {"run_root": directory, "run_id": "run-1"}
                 root = run_job._prepare_run_dir(request)
                 resolved = copy.deepcopy(original)
                 plan = {"learned_proposal": {},
                         "resolved_job_digest": resolved["resolved_job_digest"]}
+                destination = None
+                if mismatch and mismatch.startswith("destination"):
+                    destination = {key: copy.deepcopy(resolved[key]) for key in (
+                        "normalized_job", "input_digests", "resolved_job_digest",
+                    )}
+                    destination["normalized_job"].update(
+                        job_id="independent-destination-job", place_id="PLACE_B",
+                        cell_calibration_id="cal-b", x_mm=-15, y_mm=9, yaw_deg=-32,
+                        operator_or_agent_id="destination-operator",
+                    )
+                    destination["input_digests"]["cell_calibration"] = run_job.canonical_digest("destination-calibration")
+                    destination["resolved_job_digest"] = run_job.canonical_digest({
+                        "job": destination["normalized_job"], "input_digests": destination["input_digests"],
+                    })
+                    resolved["destination_resolved_inputs"] = copy.deepcopy(destination)
+                    plan["learned_source_program"] = {
+                        "schema_version": "fr5.motion_program.v4",
+                        "destination_resolved_job_digest": destination["resolved_job_digest"],
+                        "destination_binding_digests": copy.deepcopy(destination["input_digests"]),
+                    }
+                    if mismatch in {"destination", "destination_redigest"}:
+                        resolved["destination_resolved_inputs"]["normalized_job"]["x_mm"] += 1
+                        if mismatch == "destination_redigest":
+                            forged = resolved["destination_resolved_inputs"]
+                            forged["resolved_job_digest"] = run_job.canonical_digest({
+                                "job": forged["normalized_job"], "input_digests": forged["input_digests"],
+                            })
+                    elif mismatch == "destination_digest":
+                        plan["learned_source_program"]["destination_resolved_job_digest"] = run_job.canonical_digest("other-destination")
+                    elif mismatch == "destination_inputs":
+                        plan["learned_source_program"]["destination_binding_digests"]["cell_calibration"] = run_job.canonical_digest("other-calibration")
+                    elif mismatch == "destination_missing":
+                        del resolved["destination_resolved_inputs"]
                 if mismatch == "source":
                     resolved["normalized_job"]["x_mm"] += 1
                 elif mismatch == "plan":
@@ -122,8 +157,9 @@ class RunJobTest(unittest.TestCase):
                     "plan": plan, "precommit_safety": safety,
                     "precommit_evidence": precommit, "operator_summary": {},
                 }}
-                if mismatch:
-                    with self.assertRaisesRegex(run_job.ContractError, "PREAPPROVAL_RESOLVED_INPUTS"):
+                if mismatch and mismatch != "destination_valid":
+                    code = "PREAPPROVAL_DESTINATION_RESOLVED_INPUTS" if mismatch.startswith("destination") else "PREAPPROVAL_RESOLVED_INPUTS"
+                    with self.assertRaisesRegex(run_job.ContractError, code):
                         run_job._write_preapproval_evidence(request, resolved, planned, None)
                     self.assertEqual(list(root.iterdir()), [])
                     continue
@@ -132,6 +168,10 @@ class RunJobTest(unittest.TestCase):
                     "normalized_job", "input_digests", "resolved_job_digest",
                 )}
                 self.assertEqual(evidence["resolved_inputs"], receipt)
+                if destination is not None:
+                    self.assertEqual(evidence["destination_resolved_inputs"], destination)
+                    resolved["destination_resolved_inputs"]["normalized_job"]["x_mm"] += 2
+                    self.assertEqual(evidence["destination_resolved_inputs"], destination)
                 self.assertEqual(evidence["plan_envelope"]["plan"], plan)
                 self.assertIsNone(evidence["trajectory_variant_binding"])
                 # A later in-memory/current-position update cannot rewrite the
@@ -2874,6 +2914,7 @@ class RunJobTest(unittest.TestCase):
         destination_validated = {
             **pick_place_validated,
             "normalized_job": destination_job,
+            "input_digests": {"cell_calibration": "sha256:" + "d" * 64},
             "resolved_job_digest": "sha256:" + "c" * 64,
         }
         cross = {
@@ -2909,10 +2950,16 @@ class RunJobTest(unittest.TestCase):
                 run_job, "resolve_motion_program", return_value={},
             ) as cross_resolve,
         ):
-            _, _, binding = run_job.resolve_inputs(
+            cross_validated, _, binding = run_job.resolve_inputs(
                 cross, scene_binding_call=lambda _, pose, _run_id: pose,
             )
         self.assertEqual(binding["place_id"], "PLACE_B")
+        self.assertEqual(cross_validated["destination_resolved_inputs"], {
+            key: destination_validated[key] for key in (
+                "normalized_job", "input_digests", "resolved_job_digest",
+            )
+        })
+        self.assertIsNot(cross_validated["destination_resolved_inputs"]["normalized_job"], destination_job)
         self.assertIsNone(cross_resolve.call_args.kwargs["release_pose"])
         self.assertEqual(
             cross_resolve.call_args.kwargs["release_validated"],
