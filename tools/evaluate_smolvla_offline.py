@@ -258,6 +258,63 @@ def sampled_action_indices(episode_indices: list[int], frame_indices: list[int],
     return selected
 
 
+def training_diagnostic_admission(admission: dict, episodes: list[int]) -> dict:
+    """Scope an already admitted checkpoint to an explicit TRAIN diagnostic subset.
+
+    This does not change the public held-out admission or its immutable split.
+    """
+    split = admission["split"]
+    if (
+        admission["episodes"] != split["eval_episodes"]
+        or not episodes or episodes != sorted(set(episodes))
+        or any(type(ep) is not int for ep in episodes)
+        or not set(episodes).issubset(split["train_episodes"])
+        or set(episodes) & set(split["eval_episodes"])
+    ):
+        raise ValueError("TRAIN diagnostic requires a unique sorted subset of the admitted TRAIN partition")
+    return {**admission, "episodes": list(episodes), "diagnostic_partition": "train"}
+
+
+def native_flow_residual_per_axis(policy, batch, noise, flow_time) -> dict:
+    """Observe one native forward, checking axis reduction against its scalar loss.
+
+    SmolVLA calls model.forward directly, so Module forward hooks would not fire.
+    The scoped observer preserves that exact computation and is removed on failure.
+    """
+    import torch
+    from unittest.mock import patch
+
+    captured = []
+    original = policy.model.forward
+
+    def observe(*args, **kwargs):
+        result = original(*args, **kwargs)
+        captured.append(result.detach())
+        return result
+
+    with torch.inference_mode(), patch.object(policy.model, "forward", observe):
+        native, _ = policy.forward(batch, noise=noise, time=flow_time, reduction="none")
+    if len(captured) != 1 or native.shape != (1,):
+        raise ValueError("axis diagnostic requires one native batch-size-one forward")
+    raw = captured[0]
+    if raw.ndim != 3 or raw.shape[0] != 1 or raw.shape[2] < 7:
+        raise ValueError("native flow residual must contain seven FR5 axes")
+    residuals = raw[:, :, :7]
+    padding = batch.get("action_is_pad")
+    if padding is None:
+        padding = torch.zeros(raw.shape[:2], dtype=torch.bool, device=raw.device)
+    if padding.dtype != torch.bool or padding.shape != raw.shape[:2] or padding.all():
+        raise ValueError("axis diagnostic requires a valid boolean target mask")
+    valid = residuals[~padding]
+    if not torch.isfinite(valid).all():
+        raise ValueError("non-finite native flow residual")
+    per_axis = valid.mean(dim=0)
+    if not torch.allclose(per_axis.mean(), native[0], rtol=1e-5, atol=1e-7):
+        raise ValueError("per-axis reduction differs from native flow loss")
+    return {"loss": float(native.item()), "loss_per_axis": per_axis.cpu().tolist(),
+            "valid_action_steps": len(valid), "axes": ["J1", "J2", "J3", "J4", "J5", "J6", "gripper"]}
+
+
 def _evaluate_sampled_actions(args, admission, policy, preprocessor, postprocessor, dataset, device, started):
     import torch
 
@@ -310,7 +367,9 @@ def _evaluate_sampled_actions(args, admission, policy, preprocessor, postprocess
     elapsed = time.perf_counter() - inference_started
     return {
         "schema_version": 1, "metric": "smolvla_sampled_physical_action_error",
-        "evidence_scope": "sampled_admitted_heldout_actions",
+        "evidence_scope": ("sampled_admitted_train_diagnostic_actions"
+                           if admission.get("diagnostic_partition") == "train"
+                           else "sampled_admitted_heldout_actions"),
         "warning": "Open-loop errors against recorded continuations do not measure physical success.",
         "checkpoint": admission["checkpoint"], "checkpoint_tree_digest": admission["checkpoint_tree_digest"],
         "dataset": str(args.dataset.resolve()), "dataset_digest": split["dataset_identity"]["dataset_digest"],
@@ -322,7 +381,9 @@ def _evaluate_sampled_actions(args, admission, policy, preprocessor, postprocess
         "training_receipt": admission["receipt_path"], "training_receipt_digest": admission["receipt_digest"],
         "normalization_algorithm": admission["receipt"]["normalization"]["algorithm"],
         "normalization_episodes": admission["receipt"]["normalization"]["episodes"],
-        "sampling_rule": "unique floor((episode_length-1)*q), q=0.1,0.5,0.9, every held-out episode",
+        "sampling_rule": ("unique floor((episode_length-1)*q), q=0.1,0.5,0.9, every selected TRAIN diagnostic episode"
+                          if admission.get("diagnostic_partition") == "train" else
+                          "unique floor((episode_length-1)*q), q=0.1,0.5,0.9, every held-out episode"),
         "samples": len(rows), "available_samples": len(dataset), "sampling_complete": True,
         "evaluation_complete": False, "seed": args.seed, "noise": {**tensor_identity(noise), "values": noise.tolist()},
         "noise_scope": "same CPU float32 noise for every selected observation",

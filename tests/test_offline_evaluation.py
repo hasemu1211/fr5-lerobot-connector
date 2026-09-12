@@ -22,6 +22,8 @@ from tools.evaluate_smolvla_offline import (
     parse_episode_indices,
     sampled_action_indices,
     _evaluate_sampled_actions,
+    training_diagnostic_admission,
+    native_flow_residual_per_axis,
 )
 
 
@@ -161,6 +163,77 @@ def fake_inference_modules(admission: dict, batches: list[dict]) -> dict[str, Mo
 
 
 class OfflineEvaluationTest(unittest.TestCase):
+    def test_train_diagnostic_preserves_partition_and_rejects_heldout_or_foreign_scope(self):
+        admission = {"episodes": [8, 9], "split": {"train_episodes": list(range(8)), "eval_episodes": [8, 9]}}
+        scoped = training_diagnostic_admission(admission, [1, 5])
+        self.assertEqual(scoped["episodes"], [1, 5])
+        self.assertEqual(scoped["diagnostic_partition"], "train")
+        self.assertEqual(admission["episodes"], [8, 9])
+        self.assertIs(scoped["split"], admission["split"])
+        for episodes in ([], [1, 1], [5, 1], [1, 8], [10], [True]):
+            with self.subTest(episodes=episodes), self.assertRaises(ValueError):
+                training_diagnostic_admission(admission, episodes)
+        with self.assertRaises(ValueError):
+            training_diagnostic_admission(scoped, [2])
+
+    @staticmethod
+    def diagnostic_policy(raw, *, wrong_reduction=False, fail=False):
+        class Model:
+            def forward(self):
+                return raw
+
+        class Policy:
+            model = Model()
+
+            def forward(self, batch, **kwargs):
+                residual = self.model.forward()
+                if fail:
+                    raise RuntimeError("injected native failure")
+                valid = residual[~batch["action_is_pad"]]
+                return (valid if wrong_reduction else valid[:, :7]).mean().reshape(1), {}
+
+        return Policy()
+
+    def test_native_axis_reduction_excludes_time_and_dimension_padding(self):
+        import torch
+        raw = torch.full((1, 3, 9), 1e6)
+        raw[0, 0, :7] = torch.arange(1., 8.)
+        raw[0, 2, :7] = torch.arange(1., 8.) * 3
+        policy = self.diagnostic_policy(raw)
+        original = policy.model.forward
+        result = native_flow_residual_per_axis(policy, {"action_is_pad": torch.tensor([[False, True, False]])}, None, None)
+        self.assertEqual(result["loss_per_axis"], [2., 4., 6., 8., 10., 12., 14.])
+        self.assertEqual(result["valid_action_steps"], 2)
+        self.assertEqual(result["loss"], 8.)
+        self.assertEqual(policy.model.forward, original)
+        self.assertNotIn("forward", policy.model.__dict__)
+
+    def test_native_axis_reduction_rejects_a_changed_native_denominator(self):
+        import torch
+        raw = torch.ones(1, 2, 9)
+        raw[:, :, 7:] = 100
+        policy = self.diagnostic_policy(raw, wrong_reduction=True)
+        with self.assertRaisesRegex(ValueError, "differs from native"):
+            native_flow_residual_per_axis(policy, {"action_is_pad": torch.zeros(1, 2, dtype=torch.bool)}, None, None)
+
+    def test_native_axis_observer_restores_forward_after_failure(self):
+        import torch
+        policy = self.diagnostic_policy(torch.ones(1, 2, 7), fail=True)
+        original = policy.model.forward
+        with self.assertRaisesRegex(RuntimeError, "injected native"):
+            native_flow_residual_per_axis(policy, {"action_is_pad": torch.zeros(1, 2, dtype=torch.bool)}, None, None)
+        self.assertEqual(policy.model.forward, original)
+        self.assertNotIn("forward", policy.model.__dict__)
+
+    def test_native_axis_reduction_rejects_nonfinite_and_empty_targets(self):
+        import torch
+        raw = torch.ones(1, 2, 7)
+        raw[0, 0, 5] = float("nan")
+        with self.assertRaisesRegex(ValueError, "non-finite"):
+            native_flow_residual_per_axis(self.diagnostic_policy(raw), {"action_is_pad": torch.zeros(1, 2, dtype=torch.bool)}, None, None)
+        with self.assertRaisesRegex(ValueError, "valid boolean"):
+            native_flow_residual_per_axis(self.diagnostic_policy(torch.ones(1, 2, 7)), {"action_is_pad": torch.ones(1, 2, dtype=torch.bool)}, None, None)
+
     def test_action_metrics_keep_units_and_exclude_padding(self):
         measured = action_error_metrics(
             [[1.] * 6 + [.001], [2.] * 6 + [.002], [999.] * 7],
