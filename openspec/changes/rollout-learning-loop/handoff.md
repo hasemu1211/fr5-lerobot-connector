@@ -8,9 +8,14 @@ the separately approved bidirectional pick-place rhythm40 set, TRAIN 0–31 and
 heldout 32–39, raw RGB without augmentation. Actual training reached 12,000 steps
 and printed `End of training` at 18:40:50 KST; 3k/6k/9k/12k saved checkpoints
 exist. This is not evidence of task success or a best checkpoint. Learning's
-existing owner now compares identical heldout observations and paired noise,
-one model/process at a time, without training or device effects. Its outputs
-are isolated under `.agent-local/work/lerobot-fr5/learning-rhythm40-20260912`.
+paired comparison is complete: 24 heldout observations with three shared noise
+seeds per checkpoint favor 12k for the next no-effect proposal check, not physical
+execution. Ten of its 72 chunks still reject gripper projection, and J6 jumps
+remain substantial. The existing owner now reuses saved outputs to test the
+current serialized/retimed execution contract without another model load.
+Canonical comparison and limits are in
+`.agent-local/work/lerobot-fr5/learning-rhythm40-20260912/comparison-r2/REPORT.md`
+(SHA-256 `28438da6dc9f09e18db000c5c40c5788f78d62558c2bfec5f0f1f77e21b87014`).
 
 Root's proposal-evidence slice optionally connects the actual existing chunk
 bridge to the existing sidecar before validation. A read-only diagnostic replays
@@ -22,8 +27,13 @@ bound to proposed actions. The correction preserves rejection priority even
 when candidate storage fails, projects/retains one tensor snapshot, and replays
 a shared pure gripper projection while comparing all six arm values exactly.
 The corrected plugin/evidence/recommendation regression passes 74 tests, including
-both falsifiers and alternate float encodings. Fresh review of the correction
-and the whole-repository stable gate remain pending. Hashes do not authenticate
+both falsifiers and alternate float encodings. Independent immutable review of
+`6e82d5585096dfea54fae67ea2d7ac0079b44aa5` against `645fe03` reports no scoped
+findings and independently passes 74 tests in 9.744 seconds. It rejects
+re-digested mismatches in all seven processed columns, accepts six supported
+float encodings, and verifies validator-error priority and snapshot isolation.
+The whole-repository stable gate remains running; this source/CPU result does
+not qualify real policy loading or hardware execution. Hashes do not authenticate
 an externally fabricated sidecar. This does not connect the rollout CLI to physical execution: plugin
 `send_action` remains blocked and source/destination-bound pick-place failure
 recollection remains open. Do not treat proposal diagnostics as terminal
