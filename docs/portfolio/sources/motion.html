@@ -422,4 +422,50 @@
 1132                          or snapshot[&quot;scene_state&quot;][&quot;revision&quot;] != execution[&quot;scene_revision&quot;]
 1133                          or snapshot[&quot;scene_state&quot;][&quot;objects&quot;].get(plan[&quot;scene_binding&quot;][&quot;object_instance_id&quot;]) != execution[&quot;scene_object&quot;]):
 1134                      raise ContractError(&quot;SCENE_STATE_CHANGED&quot;)
-1135                  self._check_chunk_boundary(run, payload[&quot;lease_id&quot;])</pre><p><a href="recommendation-core.html#scene-context">물체 상태·출처·revision의 정본 ↗</a></p></section></main></body></html>
+1135                  self._check_chunk_boundary(run, payload[&quot;lease_id&quot;])</pre><p><a href="recommendation-core.html#scene-context">물체 상태·출처·revision의 정본 ↗</a></p></section><section id="native-runtime"><h2>LeRobot·FR5 실행 연결 · 2026-09-12</h2><a href="../architecture.html#native-runtime">← 실행 구조로 돌아가기</a><p>기준 main645fe03. LeRobot의 추론·처리기·큐를 재사용하며, 장비 실행과 취소는 FR5의 기존 단일 owner로 연결하는 구조이다. 플러그인의 send_action은 아직 실행을 거부한다.</p><p class="locator">plugins/lerobot_robot_fr5/src/lerobot_robot_fr5/fr5.py · main645fe03<br>sha256:f7e262683671a93e68aca0ae13758d7029aac9dcf49078d0032207ec4661c51a</p><pre>396:     def send_action(self, action: dict[str, Any]) -&gt; dict[str, Any]:
+397:         # Deliberately fail closed until the FR5 action processor,
+398:         # chunk safety strategy, and actual-sent-action evidence are bound.
+399:         raise RuntimeError(&quot;FR5_ACTION_NOT_AUTHORIZED&quot;)</pre><p class="locator">plugins/lerobot_strategy_fr5/src/lerobot_strategy_fr5/chunk_tap.py · main645fe03<br>sha256:855b0a2b9722d01cfedb46e945349a946e45d50bb36f2cbc1846a11752326b91</p><pre>75:
+76:             expected = int(self.policy.config.n_action_steps)
+77:             if raw.shape[1] != expected:
+78:                 raise RuntimeError(
+79:                     f&quot;FR5_CHUNK_LENGTH: {raw.shape[1]} != {expected}&quot;
+80:                 )
+81:
+82:             raw_copy = raw.detach().clone()
+83:
+84:             self._sequence += 1
+85:             self.on_chunk(
+86:                 CapturedPolicyChunk(
+87:                     sequence=self._sequence,
+88:                     raw=raw_copy,
+89:                     raw_sha256=_tensor_sha256(raw_copy),
+90:                 )
+91:             )
+92: </pre><p class="locator">openspec/changes/rollout-learning-loop/handoff.md · main645fe03<br>sha256:e4a610e44def35f6e194c8d6f0ca7489c4a36e7a9c25554fab153f6fe4cdd126</p><pre>36:
+37: ## Physical coherent-delivery qualification — 2026-09-11
+38:
+39: The v5 coherent-delivery successor passed a bounded real-FR5 current-position
+40: hold qualification. The run used the isolated coherent SDK/plugin overlay with
+41: `FR5_REQUIRE_GRIPPER_SOURCE_CLOCK=true` and
+42: `FR5_REQUIRE_COHERENT_SNAPSHOT=true`.
+43:
+44: After the post-bind bootstrap publication, the readiness probe observed 10.0007 s
+45: of valid wire-v5 delivery with producer sequence advancing from 593 to 1841,
+46: 999 distinct progress events, connection epoch 1 and configuration epoch 0
+47: remaining stable. The probe accepted 3,999 reads; 3,000 repeated reads were not
+48: counted as source progress. `READINESS_RC=0` and
+49: `NATIVE_V5_READINESS_PASS` were produced. No learned trajectory or gripper goal
+50: was submitted by the probe.
+51:
+52: The earlier immediate `LEARNED_HARDWARE_STALE` result was a diagnostic bootstrap
+53: race: policy binding completed before the first new coherent publication was
+54: observed. The diagnostic was corrected to wait up to one second only for the
+55: first strictly newer post-bind producer sequence; the existing 100 ms live
+56: freshness bound was not relaxed after readiness.
+57:
+58: This qualifies bounded physical coherent-state continuity for the current-position
+59: hold only. It does not qualify learned Pick success, physical gripper
+60: same-command completion, mechanical task success, or long-duration operation.
+61: Shutdown-time RViz/controller-manager context errors occurred after successful
+62: hardware deactivation and are not counted as execution evidence.</pre><p>실행 전 diagnostic의 NOT_EVALUATED는 실행 평가를 거치지 않은 입력을 뜻한다. 작업 실패나 재수집 deficit으로 분류하지 않는다.</p></section></main></body></html>

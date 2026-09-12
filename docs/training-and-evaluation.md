@@ -2,6 +2,29 @@
 
 실물 시연으로 SmolVLA를 미세 조정하고, 데이터·학습 설정의 변경을 같은 평가 조건에서 비교한다.
 
+## Pick & Place · 2026.09.12
+
+양방향 시연 40개를 TRAIN 32개와 heldout 8개로 분리해 SmolVLA base에서 12,000 step을 학습했다. Batch 4, vision 고정, action expert 학습이며 saved pre/postprocessor와 TRAIN 정규화 통계를 보존했다.
+
+![같은24관측과3개 noise seed의 checkpoint별 flow loss](portfolio/assets/rhythm40-loss.svg)
+
+12k는 네 checkpoint 중 평균 flow loss·관절·그리퍼 오차가 가장 작아 다음 실행 전 검증 후보로 선정됐다. J6의 큰 진입 변화와 그리퍼 범위 초과가 남아 있다. 이 결과는 동일 수집 환경의 오프라인 비교이다.
+
+현재 LeRobot이 모델·processor·추론 큐를 제공하고 FR5 플러그인이 장비 상태·실행·취소를 연결한다. 학습 정책의 Pick & Place 실행은 실물 검증 대상이다. 9월 11일에는 자세 유지 조건에서 같은 시점의 로봇 상태를 10초간 연속 전달함을 확인했다.
+
+<details>
+<summary>현재 데이터 구조와 원본 식별</summary>
+
+- LeRobot v3: 40개 시연, 28,209 frame, 두 방향 instruction, dual RGB, 7D 절대 관절 위치·gripper opening.
+- TRAIN 22,299 frame / heldout 5,910 frame. 평가에는 24개 관측과 세 paired seed를 사용했다.
+- 저장 파일은 chunk/file 단위이며 시연 경계는 metadata의 frame·video 시간 범위로 복원한다. TRAIN/EVAL 배정은 원본 시연에 묶인다.
+- 학습 원본: `outputs/local-learning/smolvla-pickplace-rhythm40-clean-12000-r1/`의 split·saved processor·checkpoint training state.
+- 비교 원본: Learning `comparison-r2/REPORT.md`, SHA-256 `28438da6dc9f09e18db000c5c40c5788f78d62558c2bfec5f0f1f77e21b87014`. 실제 발췌와 식별값은 포트폴리오의 기존 [학습 근거 원본](portfolio/sources/learning-comparison.html)에 보존한다.
+
+[LeRobot v3 저장 구조](https://huggingface.co/docs/lerobot/lerobot-dataset-v3) · [Native rollout](https://huggingface.co/docs/lerobot/inference) · [FR5 장비 플러그인](../plugins/lerobot_robot_fr5/src/lerobot_robot_fr5/fr5.py)
+
+</details>
+
 ## Observation → Action Chunk
 
 ![두 RGB 영상·작업 지시·7D 로봇 상태를 SmolVLA의 맥락 특징으로 변환하고, Action Expert가 50 × 7 동작 묶음을 생성한다.](portfolio/policy-model.drawio.svg)
@@ -27,9 +50,9 @@ FR5 action은 절대 joint-position과 gripper를 포함하는 7D 계약이다. 
 
 ## Split & Normalization
 
-![선택한 시연을 TRAIN과 평가로 분리하고 TRAIN 통계로 학습을 정규화한다. 평가와 출력 복원은 checkpoint에 저장한 같은 통계를 사용한다.](portfolio/normalization.drawio.svg)
+![선택한 시연을 TRAIN과 평가로 분리하고 TRAIN 통계로 학습을 정규화한다. 평가와 출력 복원은 checkpoint에 저장한 같은 통계를 사용한다.](portfolio/normalization-rhythm40.drawio.svg)
 
-그림은 보존된 비교 실험의 분할이다. 데이터 선택을 바꿔도 평가 대상을 유지하고, 평가 시연이 정규화 기준에 섞이지 않도록 실제 trainer의 분할·통계를 검증한다.
+그림은 현재 Pick & Place 학습의 32/8 분할이다. 데이터 선택을 바꿔도 평가 대상을 유지하고, 평가 시연이 정규화 기준에 섞이지 않도록 실제 trainer의 분할·통계를 검증한다.
 
 | 바꾸는 것 | 보존하는 비교 기준 | 확인하는 결과 |
 | --- | --- | --- |

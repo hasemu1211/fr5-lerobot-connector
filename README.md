@@ -8,6 +8,8 @@
 
 Pick & Place · 21.1초
 
+양방향 Pick & Place 40개로 SmolVLA 학습과 4개 checkpoint의 heldout 비교를 수행했다. 실물 실행 근거는 자세 유지 중 10초 상태 전달이며, 학습 정책의 Pick & Place 실행은 검증 대상이다. [학습 결과와 실행 경계](docs/training-and-evaluation.md#pick--place--20260912)
+
 ## Robot Skill Adaptation
 
 ![상위 작업 목표를 실행 skill로 구체화하는 확장 맥락과, 실물 시연·정책 실행·평가·다음 수집을 잇는 데이터 엔진](docs/portfolio/skill-adaptation.drawio.svg)

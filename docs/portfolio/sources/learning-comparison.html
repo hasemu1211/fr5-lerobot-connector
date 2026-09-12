@@ -1423,4 +1423,407 @@
   &quot;sampling_complete&quot;: true,
   &quot;evaluation_complete&quot;: false,
   &quot;noise_sha256&quot;: &quot;36b957ea048d809cd54eea8ad32f6641804eecb9c1e9438a8162f64fd1b02615&quot;
-}</pre></section></main><script src="../source-return.js"></script></body></html>
+}</pre></section><section id="rhythm40"><h2>Bidirectional Pick &amp; Place · 2026-09-12</h2><a href="../learning.html#rhythm40">← 최신 학습으로 돌아가기</a><p>새 SmolVLA base에서 학습한40개 시연이다. 이전 raw26 continuation과 데이터·초기 모델이 다르다. 아래 저장 상태는12,000 step 도달을 확인하며, checkpoint의 우열이나 실물 성공을 뜻하지 않는다.</p><p class="locator">outputs/local-learning/smolvla-pickplace-rhythm40-clean-12000-r1/fr5_training_split.json<br>sha256:e3d70a90a02310789e6f7763c23c08a3ea23604cd06fbd0adcd8692d9ca42eaa</p><pre>{
+  &quot;dataset_identity&quot;: {
+    &quot;dataset_digest&quot;: &quot;sha256:ff78d9cf00eef980905d83d670889f52b254a6933606ae0ef560ebc71381f8e6&quot;,
+    &quot;dataset_id&quot;: &quot;fr5-pickplace-rhythm-ab-curated40-r1&quot;,
+    &quot;dataset_root&quot;: &quot;datasets/fr5_episodes/fr5_pickplace_rhythm_ab_20260907_r01&quot;,
+    &quot;repo_id&quot;: &quot;local/fr5_smolvla_up_wrist_30hz&quot;
+  },
+  &quot;split_digest&quot;: &quot;sha256:03d55846a3c85bc5d4907b2d00853df78af35b6b84be99924741b0382c62f2bd&quot;,
+  &quot;total_episodes&quot;: 40,
+  &quot;total_frames&quot;: 28209,
+  &quot;train_episodes&quot;: [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31
+  ],
+  &quot;eval_episodes&quot;: [
+    32,
+    33,
+    34,
+    35,
+    36,
+    37,
+    38,
+    39
+  ]
+}</pre><p class="locator">outputs/local-learning/smolvla-pickplace-rhythm40-clean-12000-r1/checkpoints/003000/training_state/training_step.json<br>sha256:495b2b95315492da577b898d5dcf1c526fec96785ea8efa638cd0d996c0eb040</p><pre>{
+  &quot;step&quot;: 3000,
+  &quot;num_processes&quot;: 1,
+  &quot;batch_size&quot;: 4
+}</pre><p class="locator">outputs/local-learning/smolvla-pickplace-rhythm40-clean-12000-r1/checkpoints/006000/training_state/training_step.json<br>sha256:d394ef21a51a81a4fc45e9f0a02ed3ce562c17679b3cdbfa0daf58b1fe2de9a6</p><pre>{
+  &quot;step&quot;: 6000,
+  &quot;num_processes&quot;: 1,
+  &quot;batch_size&quot;: 4
+}</pre><p class="locator">outputs/local-learning/smolvla-pickplace-rhythm40-clean-12000-r1/checkpoints/009000/training_state/training_step.json<br>sha256:df45e30f4f43270048d61273854d424692063633efd74cd4c09f84d6fe8e3785</p><pre>{
+  &quot;step&quot;: 9000,
+  &quot;num_processes&quot;: 1,
+  &quot;batch_size&quot;: 4
+}</pre><p class="locator">outputs/local-learning/smolvla-pickplace-rhythm40-clean-12000-r1/checkpoints/012000/training_state/training_step.json<br>sha256:0057d2e0b9dbea953cf3bb4b497268bf759bdd28be5d043294be8b69c7d05144</p><pre>{
+  &quot;step&quot;: 12000,
+  &quot;num_processes&quot;: 1,
+  &quot;batch_size&quot;: 4
+}</pre><p class="locator">outputs/local-learning/smolvla-pickplace-rhythm40-clean-12000-r1/checkpoints/012000/pretrained_model/config.json<br>sha256:6cd0d1a8fd4d2be5b056148f2706f1b87ff19434aa5f9ce8e946a4c37a16041a</p><pre>{
+  &quot;pretrained_path&quot;: &quot;lerobot/smolvla_base&quot;,
+  &quot;chunk_size&quot;: 50,
+  &quot;num_steps&quot;: 10,
+  &quot;freeze_vision_encoder&quot;: true,
+  &quot;train_expert_only&quot;: true,
+  &quot;train_state_proj&quot;: true,
+  &quot;use_peft&quot;: false,
+  &quot;use_amp&quot;: false,
+  &quot;optimizer_lr&quot;: 5e-05
+}</pre><p class="locator">outputs/local-learning/smolvla-pickplace-rhythm40-clean-12000-r1/checkpoints/012000/pretrained_model/policy_preprocessor.json<br>sha256:66c0832e3ac8fdb162362ea06105fada8bd716b0512556b291dde4e1ceafbe0d</p><pre>{
+  &quot;name&quot;: &quot;policy_preprocessor&quot;,
+  &quot;steps&quot;: [
+    {
+      &quot;registry_name&quot;: &quot;rename_observations_processor&quot;,
+      &quot;config&quot;: {
+        &quot;rename_map&quot;: {
+          &quot;observation.images.up&quot;: &quot;observation.images.camera1&quot;,
+          &quot;observation.images.wrist&quot;: &quot;observation.images.camera2&quot;
+        }
+      }
+    },
+    {
+      &quot;registry_name&quot;: &quot;to_batch_processor&quot;,
+      &quot;config&quot;: {}
+    },
+    {
+      &quot;registry_name&quot;: &quot;smolvla_new_line_processor&quot;,
+      &quot;config&quot;: {}
+    },
+    {
+      &quot;registry_name&quot;: &quot;tokenizer_processor&quot;,
+      &quot;config&quot;: {
+        &quot;max_length&quot;: 48,
+        &quot;task_key&quot;: &quot;task&quot;,
+        &quot;padding_side&quot;: &quot;right&quot;,
+        &quot;padding&quot;: &quot;max_length&quot;,
+        &quot;truncation&quot;: true,
+        &quot;tokenizer_name&quot;: &quot;HuggingFaceTB/SmolVLM2-500M-Video-Instruct&quot;
+      }
+    },
+    {
+      &quot;registry_name&quot;: &quot;device_processor&quot;,
+      &quot;config&quot;: {
+        &quot;device&quot;: &quot;cuda&quot;,
+        &quot;float_dtype&quot;: null
+      }
+    },
+    {
+      &quot;registry_name&quot;: &quot;normalizer_processor&quot;,
+      &quot;config&quot;: {
+        &quot;eps&quot;: 1e-08,
+        &quot;features&quot;: {
+          &quot;observation.state&quot;: {
+            &quot;type&quot;: &quot;STATE&quot;,
+            &quot;shape&quot;: [
+              7
+            ]
+          },
+          &quot;observation.images.camera1&quot;: {
+            &quot;type&quot;: &quot;VISUAL&quot;,
+            &quot;shape&quot;: [
+              3,
+              480,
+              640
+            ]
+          },
+          &quot;observation.images.camera2&quot;: {
+            &quot;type&quot;: &quot;VISUAL&quot;,
+            &quot;shape&quot;: [
+              3,
+              480,
+              640
+            ]
+          },
+          &quot;observation.images.camera3&quot;: {
+            &quot;type&quot;: &quot;VISUAL&quot;,
+            &quot;shape&quot;: [
+              3,
+              256,
+              256
+            ]
+          },
+          &quot;observation.images.empty_camera_0&quot;: {
+            &quot;type&quot;: &quot;VISUAL&quot;,
+            &quot;shape&quot;: [
+              3,
+              480,
+              640
+            ]
+          },
+          &quot;action&quot;: {
+            &quot;type&quot;: &quot;ACTION&quot;,
+            &quot;shape&quot;: [
+              7
+            ]
+          }
+        },
+        &quot;norm_map&quot;: {
+          &quot;VISUAL&quot;: &quot;IDENTITY&quot;,
+          &quot;STATE&quot;: &quot;MEAN_STD&quot;,
+          &quot;ACTION&quot;: &quot;MEAN_STD&quot;
+        }
+      },
+      &quot;state_file&quot;: &quot;policy_preprocessor_step_5_normalizer_processor.safetensors&quot;
+    }
+  ]
+}</pre><p class="locator">outputs/local-learning/smolvla-pickplace-rhythm40-clean-12000-r1/checkpoints/012000/pretrained_model/policy_postprocessor.json<br>sha256:3b51f092c70c710ce0213ee1b63bf51b4878ec67828dd2d67daf9ef51081a41a</p><pre>{
+  &quot;name&quot;: &quot;policy_postprocessor&quot;,
+  &quot;steps&quot;: [
+    {
+      &quot;registry_name&quot;: &quot;unnormalizer_processor&quot;,
+      &quot;config&quot;: {
+        &quot;eps&quot;: 1e-08,
+        &quot;features&quot;: {
+          &quot;action&quot;: {
+            &quot;type&quot;: &quot;ACTION&quot;,
+            &quot;shape&quot;: [
+              7
+            ]
+          }
+        },
+        &quot;norm_map&quot;: {
+          &quot;VISUAL&quot;: &quot;IDENTITY&quot;,
+          &quot;STATE&quot;: &quot;MEAN_STD&quot;,
+          &quot;ACTION&quot;: &quot;MEAN_STD&quot;
+        }
+      },
+      &quot;state_file&quot;: &quot;policy_postprocessor_step_0_unnormalizer_processor.safetensors&quot;
+    },
+    {
+      &quot;registry_name&quot;: &quot;device_processor&quot;,
+      &quot;config&quot;: {
+        &quot;device&quot;: &quot;cpu&quot;,
+        &quot;float_dtype&quot;: null
+      }
+    }
+  ]
+}</pre><p>Launch receipt의 ADMITTED_NOT_TRAINED는 시작 전 승인 기록이다. 이후 checkpoint·학습 종료 근거와 구분한다. 학습용32개에서 계산한 정규화와8개 heldout을 보존한다.</p></section><section id="rhythm40-evaluation"><h2>Pick &amp; Place · paired checkpoint comparison</h2><p>2026.09.12 · .agent-local/work/lerobot-fr5/learning-rhythm40-20260912/comparison-r2/REPORT.md</p><p>SHA-256 <code>28438da6dc9f09e18db000c5c40c5788f78d62558c2bfec5f0f1f77e21b87014</code></p><p>24개 heldout 관측과 세 seed를 짝지어 네 checkpoint를 비교했다. 12k는 다음 실행 전 검증 후보이다. 이 비교는 실물 성공률을 측정하지 않는다.</p><details><summary>원본 요약과 비교표</summary><pre>**Select 012000 for root’s next guarded, no-effect proposal/admission qualification. No checkpoint is qualified for physical execution by this comparison.** 012000 has the lowest pooled flow loss, arm error, gripper error and first-jump maximum. It improves both instruction-level averages and all three seed-level averages over 009000 for loss and arm/gripper error. The remaining gripper rejections and large arm jumps must remain visible to the existing execution guards. Root owns plugin execution and integration; there is no automatic promotion.
+
+The bounded owner outcome is complete: four admitted checkpoints, paired heldout evidence, limits and a next consumer. No Task, Dispatch, session or native Goal was created; the retained owner worktree and completed Goal accounting were preserved.
+
+| Checkpoint | Paired flow loss | Arm component RMSE (deg) | Gripper RMSE (mm) | Max first J6 jump (deg) | Internal arm velocity RMS (rad/s) | Gripper rejected chunks /72 |
+|---|---:|---:|---:|---:|---:|---:|
+| 003000 | 0.270207 | 8.799 | 2.835 | 59.44 | 0.428713 | 19 |
+| 006000 | 0.270152 | 9.042 | 1.109 | 52.62 | 0.371244 | 16 |
+| 009000 | 0.232749 | 7.977 | 0.695 | 50.71 | 0.327350 | 19 |
+| 012000 | 0.226981 | 7.662 | 0.540 | 46.39 | 0.326612 | 10 |
+
+The 009000→012000 gain is uneven: after averaging seeds within each observation, arm RMSE improves on 17/24 observations, gripper RMSE on 13/24, first-jump arm RMS on 23/24, and internal velocity RMS on only 11/24. J6 internal velocity p95 rises from 1.0967 to 1.0997 rad/s and maximum from 2.3883 to 2.4405 rad/s. Do not describe 12000 as convergence or a uniformly smoother policy. 6000 also illustrates why later/lower-gripper-error is not automatically better: its pooled arm RMSE is worse than 3000.
+
+</pre></details><details><summary>표본과 정규화</summary><pre>TRAIN=0–31 (32 episodes, 22,299 normalization frames); EVAL=32–39 (8 episodes, 5,910 frames); dataset total=28,209 frames. All 24 selected chunks have 50 nonpadded target actions. Per checkpoint: 3,600 target/predicted rows per axis, 21,600 arm scalar errors, 3,600 gripper scalar errors, 72 first jumps per axis, 3,528 internal first differences per axis, and 3,456 second differences per axis. A direction group has 12 unique observations/36 chunks/1,800 rows; a time-fraction group has 8 observations/24 chunks/1,200 rows; a seed has 24 observations/24 chunks/1,200 rows. Repeated seeds reuse the same targets: only 1,200 distinct selected target rows before any overlap, not 3,600 independent demonstrations.
+
+Flow loss uses the same 24 observations × three explicit native distribution draws. For each (seed, dataset_index), CPU torch.manual_seed(100000×seed+dataset_index) precedes native sample_noise and native sample_time; their hashes/time values must match across checkpoints. Native forward(reduction=&quot;none&quot;) averages squared flow residual over valid timesteps × seven physical action axes after preprocessing; the report averages 72 sample losses. All target steps are valid here, so each draw has denominator 50×7=350 and the combined loss denominator is 25,200. This is a bounded stochastic validation loss, not full 5,910-frame EVAL loss. Flow matching has no denoising solver; fixed10 applies to sampled action chunks.
+
+</pre></details><details><summary>실행 경계에 남은 오차</summary><pre>At 12000, J6 first-jump RMS is 17.316° and maximum 46.387°; the matching recorded target first-jump maximum is 0.530°. J6 internal velocity RMS is 0.5570 rad/s versus GT 0.08319 rad/s. J6 second-difference RMS is 28.3184 rad/s² versus GT 0.04383 rad/s². No acceleration acceptance limit is invented. J5 is nearly constant in TRAIN and in the targets, which is why per-axis values accompany the pooled arm score.
+
+</pre></details><details><summary>그리퍼와 seed 의존성</summary><pre>12000 has 20 rejected rows in 10 chunks, all at the late time fraction: five chunks per direction. Seed0 rejects episode34/frame659 and episode39/frame685; seed2 rejects all eight late observations; seed1 rejects none. Selecting seed1 would disguise a real dependency on sampling noise. The other 3,580 rows have a defined projection, all with a nonzero percent-quantization change; those accepted rows do not make the ten partially rejected chunks valid.
+
+</pre></details><h3>LeRobot v3 · 시연 경계와 저장 파일</h3><p>저장 파일은 chunk·file 단위이며 시연은 metadata의 frame 범위와 카메라별 시간 범위로 찾는다. 학습 분할은 저장 파일명과 독립적으로 원본 시연을 지정한다.</p><p><code>datasets/fr5_episodes/fr5_pickplace_rhythm_ab_20260907_r01/meta/info.json</code> · SHA-256 <code>e0421affaa146cc6bd74f9771ba46c69e3c77bb20d8f2a3bfd431ed83e1572fc</code></p><details><summary>현재 dataset schema</summary><pre>{
+  &quot;codebase_version&quot;: &quot;v3.0&quot;,
+  &quot;total_episodes&quot;: 40,
+  &quot;total_frames&quot;: 28209,
+  &quot;total_tasks&quot;: 2,
+  &quot;fps&quot;: 30,
+  &quot;data_path&quot;: &quot;data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet&quot;,
+  &quot;video_path&quot;: &quot;videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4&quot;,
+  &quot;features&quot;: {
+    &quot;action&quot;: {
+      &quot;dtype&quot;: &quot;float32&quot;,
+      &quot;shape&quot;: [
+        7
+      ],
+      &quot;names&quot;: [
+        &quot;j1&quot;,
+        &quot;j2&quot;,
+        &quot;j3&quot;,
+        &quot;j4&quot;,
+        &quot;j5&quot;,
+        &quot;j6&quot;,
+        &quot;gripper.pos&quot;
+      ],
+      &quot;fps&quot;: 30.0
+    },
+    &quot;observation.state&quot;: {
+      &quot;dtype&quot;: &quot;float32&quot;,
+      &quot;shape&quot;: [
+        7
+      ],
+      &quot;names&quot;: [
+        &quot;j1&quot;,
+        &quot;j2&quot;,
+        &quot;j3&quot;,
+        &quot;j4&quot;,
+        &quot;j5&quot;,
+        &quot;j6&quot;,
+        &quot;gripper.pos&quot;
+      ],
+      &quot;fps&quot;: 30.0
+    },
+    &quot;observation.images.up&quot;: {
+      &quot;dtype&quot;: &quot;video&quot;,
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;names&quot;: [
+        &quot;height&quot;,
+        &quot;width&quot;,
+        &quot;channels&quot;
+      ],
+      &quot;info&quot;: {
+        &quot;video.height&quot;: 480,
+        &quot;video.width&quot;: 640,
+        &quot;video.codec&quot;: &quot;h264&quot;,
+        &quot;video.pix_fmt&quot;: &quot;yuv420p&quot;,
+        &quot;video.fps&quot;: 30,
+        &quot;video.channels&quot;: 3,
+        &quot;has_audio&quot;: false,
+        &quot;video.g&quot;: 2,
+        &quot;video.crf&quot;: 23,
+        &quot;video.preset&quot;: &quot;ultrafast&quot;,
+        &quot;video.fast_decode&quot;: 0,
+        &quot;video.video_backend&quot;: &quot;pyav&quot;,
+        &quot;video.extra_options&quot;: {},
+        &quot;is_depth_map&quot;: false
+      }
+    },
+    &quot;observation.images.wrist&quot;: {
+      &quot;dtype&quot;: &quot;video&quot;,
+      &quot;shape&quot;: [
+        480,
+        640,
+        3
+      ],
+      &quot;names&quot;: [
+        &quot;height&quot;,
+        &quot;width&quot;,
+        &quot;channels&quot;
+      ],
+      &quot;info&quot;: {
+        &quot;video.height&quot;: 480,
+        &quot;video.width&quot;: 640,
+        &quot;video.codec&quot;: &quot;h264&quot;,
+        &quot;video.pix_fmt&quot;: &quot;yuv420p&quot;,
+        &quot;video.fps&quot;: 30,
+        &quot;video.channels&quot;: 3,
+        &quot;has_audio&quot;: false,
+        &quot;video.g&quot;: 2,
+        &quot;video.crf&quot;: 23,
+        &quot;video.preset&quot;: &quot;ultrafast&quot;,
+        &quot;video.fast_decode&quot;: 0,
+        &quot;video.video_backend&quot;: &quot;pyav&quot;,
+        &quot;video.extra_options&quot;: {},
+        &quot;is_depth_map&quot;: false
+      }
+    },
+    &quot;timestamp&quot;: {
+      &quot;dtype&quot;: &quot;float32&quot;,
+      &quot;shape&quot;: [
+        1
+      ],
+      &quot;names&quot;: null
+    },
+    &quot;frame_index&quot;: {
+      &quot;dtype&quot;: &quot;int64&quot;,
+      &quot;shape&quot;: [
+        1
+      ],
+      &quot;names&quot;: null
+    },
+    &quot;episode_index&quot;: {
+      &quot;dtype&quot;: &quot;int64&quot;,
+      &quot;shape&quot;: [
+        1
+      ],
+      &quot;names&quot;: null
+    },
+    &quot;index&quot;: {
+      &quot;dtype&quot;: &quot;int64&quot;,
+      &quot;shape&quot;: [
+        1
+      ],
+      &quot;names&quot;: null
+    },
+    &quot;task_index&quot;: {
+      &quot;dtype&quot;: &quot;int64&quot;,
+      &quot;shape&quot;: [
+        1
+      ],
+      &quot;names&quot;: null
+    }
+  }
+}</pre></details><details><summary>실제 metadata 소비 · tools/validate_lerobot_dataset.py:94</summary><p>SHA-256 <code>809af2e4cef54797cf71578ad31471e0f4a968095edb992b0e27f8b91ab1b084</code></p><pre>def episode_locator(info: dict, episode_rows: list[dict], episode_index: int, repo_id: str) -&gt; dict:
+    &quot;&quot;&quot;Build the canonical ledger locator from metadata already read by this validator.&quot;&quot;&quot;
+    matches = [row for row in episode_rows if int(row[&quot;episode_index&quot;]) == episode_index]
+    if len(matches) != 1:
+        raise ContractError(&quot;EPISODE_LEDGER_LOCATOR_EPISODE&quot;)
+    episode = matches[0]
+    data_chunk = int(episode[&quot;data/chunk_index&quot;])
+    data_file = int(episode[&quot;data/file_index&quot;])
+    shard = [
+        row for row in episode_rows
+        if int(row[&quot;data/chunk_index&quot;]) == data_chunk
+        and int(row[&quot;data/file_index&quot;]) == data_file
+    ]
+    file_base = min(int(row[&quot;dataset_from_index&quot;]) for row in shard)
+    dataset_from = int(episode[&quot;dataset_from_index&quot;])
+    dataset_to = int(episode[&quot;dataset_to_index&quot;])
+    rows = dataset_to - dataset_from
+    if rows &lt;= 0 or int(episode[&quot;length&quot;]) != rows:
+        raise ContractError(&quot;EPISODE_LEDGER_LOCATOR_RANGE&quot;)
+    fps = int(info[&quot;fps&quot;])
+    videos = []
+    for camera_key in sorted(
+        key for key, feature in info[&quot;features&quot;].items()
+        if isinstance(feature, dict) and feature.get(&quot;dtype&quot;) == &quot;video&quot;
+    ):
+        prefix = f&quot;videos/{camera_key}&quot;
+        chunk_index = int(episode[f&quot;{prefix}/chunk_index&quot;])
+        file_index = int(episode[f&quot;{prefix}/file_index&quot;])
+        timestamp_start = float(episode[f&quot;{prefix}/from_timestamp&quot;])
+        timestamp_end = float(episode[f&quot;{prefix}/to_timestamp&quot;])
+        frame_start = round(timestamp_start * fps)
+        frame_end = round(timestamp_end * fps)
+        if frame_end - frame_start != rows:
+            raise ContractError(&quot;EPISODE_LEDGER_LOCATOR_RANGE&quot;)
+        videos.append({
+            &quot;camera_key&quot;: camera_key,
+            &quot;chunk_index&quot;: chunk_index,
+            &quot;file_index&quot;: file_index,
+            &quot;relative_path&quot;: info[&quot;video_path&quot;].format(
+                video_key=camera_key,</pre></details><p><a href="https://huggingface.co/docs/lerobot/lerobot-dataset-v3">LeRobotDataset v3 공식 구조</a> · <a href="../learning.html#rhythm40-comparison">정책 비교로 돌아가기</a></p></section></main><script src="../source-return.js"></script></body></html>
