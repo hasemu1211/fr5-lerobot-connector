@@ -4,13 +4,13 @@
 
 ## Pick & Place · 2026.09.12
 
-양방향 시연 40개를 TRAIN 32개와 heldout 8개로 분리해 SmolVLA base에서 12,000 step을 학습했다. Batch 4, vision 고정, action expert 학습이며 saved pre/postprocessor와 TRAIN 정규화 통계를 보존했다.
+양방향 시연 40개를 TRAIN 32개와 heldout 8개로 분리해 SmolVLA base에서 12,000 step을 학습했다. Batch 4, 시각·언어 모델(VLM) 고정, action expert 학습이며 saved pre/postprocessor와 TRAIN 정규화 통계를 보존했다.
 
 ![같은24관측과3개 noise seed의 checkpoint별 flow loss](portfolio/assets/rhythm40-loss.svg)
 
-12k는 네 checkpoint 중 평균 flow loss·관절·그리퍼 오차가 가장 작아 다음 실행 전 검증 후보로 선정됐다. J6의 큰 진입 변화와 그리퍼 범위 초과가 남아 있다. 이 결과는 동일 수집 환경의 오프라인 비교이다.
+12k는 네 checkpoint 중 평균 flow loss·관절·그리퍼 오차가 가장 작다. J6의 큰 진입 변화와 그리퍼 범위 초과는 후속 실험에서 살필 진단 항목이다. 이 오프라인 비교와 실물 실행 승인은 별도이며, 실행 계층은 실제로 보낼 동작을 검사한다.
 
-현재 LeRobot이 모델·processor·추론 큐를 제공하고 FR5 플러그인이 장비 상태·실행·취소를 연결한다. 학습 정책의 Pick & Place 실행은 실물 검증 대상이다. 9월 11일에는 자세 유지 조건에서 같은 시점의 로봇 상태를 10초간 연속 전달함을 확인했다.
+LeRobot의 모델·processor·추론 큐를 재사용한다. FR5의 기존 실행기가 단일 동작과 취소를 담당하며, native rollout에서 이 실행기로 명령을 보내는 연결은 아직 미완료이다. 학습 정책의 Pick & Place 실행은 실물 검증 대상이다. 9월 11일에는 자세 유지 조건에서 같은 시점의 로봇 상태를 10초간 연속 전달함을 확인했다.
 
 <details>
 <summary>현재 데이터 구조와 원본 식별</summary>

@@ -422,27 +422,33 @@
 1132                          or snapshot[&quot;scene_state&quot;][&quot;revision&quot;] != execution[&quot;scene_revision&quot;]
 1133                          or snapshot[&quot;scene_state&quot;][&quot;objects&quot;].get(plan[&quot;scene_binding&quot;][&quot;object_instance_id&quot;]) != execution[&quot;scene_object&quot;]):
 1134                      raise ContractError(&quot;SCENE_STATE_CHANGED&quot;)
-1135                  self._check_chunk_boundary(run, payload[&quot;lease_id&quot;])</pre><p><a href="recommendation-core.html#scene-context">물체 상태·출처·revision의 정본 ↗</a></p></section><section id="native-runtime"><h2>LeRobot·FR5 실행 연결 · 2026-09-12</h2><a href="../architecture.html#native-runtime">← 실행 구조로 돌아가기</a><p>기준 main645fe03. LeRobot의 추론·처리기·큐를 재사용하며, 장비 실행과 취소는 FR5의 기존 단일 owner로 연결하는 구조이다. 플러그인의 send_action은 아직 실행을 거부한다.</p><p class="locator">plugins/lerobot_robot_fr5/src/lerobot_robot_fr5/fr5.py · main645fe03<br>sha256:f7e262683671a93e68aca0ae13758d7029aac9dcf49078d0032207ec4661c51a</p><pre>396:     def send_action(self, action: dict[str, Any]) -&gt; dict[str, Any]:
+1135                  self._check_chunk_boundary(run, payload[&quot;lease_id&quot;])</pre><p><a href="recommendation-core.html#scene-context">물체 상태·출처·revision의 정본 ↗</a></p></section><section id="native-runtime"><h2>LeRobot·FR5 실행 연결 · 2026-09-12</h2><a href="../architecture.html#native-runtime">← 실행 구조로 돌아가기</a><p>장비·실물 상태 근거는 main645fe03, 예측 묶음 보존 코드는 main23891ce 기준이다. LeRobot의 추론·처리기·큐를 재사용하며, 장비 실행과 취소는 FR5의 기존 단일 owner로 연결하는 구조이다. 플러그인의 send_action은 아직 실행을 거부한다.</p><p class="locator">plugins/lerobot_robot_fr5/src/lerobot_robot_fr5/fr5.py · main645fe03<br>sha256:f7e262683671a93e68aca0ae13758d7029aac9dcf49078d0032207ec4661c51a</p><pre>396:     def send_action(self, action: dict[str, Any]) -&gt; dict[str, Any]:
 397:         # Deliberately fail closed until the FR5 action processor,
 398:         # chunk safety strategy, and actual-sent-action evidence are bound.
-399:         raise RuntimeError(&quot;FR5_ACTION_NOT_AUTHORIZED&quot;)</pre><p class="locator">plugins/lerobot_strategy_fr5/src/lerobot_strategy_fr5/chunk_tap.py · main645fe03<br>sha256:855b0a2b9722d01cfedb46e945349a946e45d50bb36f2cbc1846a11752326b91</p><pre>75:
-76:             expected = int(self.policy.config.n_action_steps)
-77:             if raw.shape[1] != expected:
-78:                 raise RuntimeError(
-79:                     f&quot;FR5_CHUNK_LENGTH: {raw.shape[1]} != {expected}&quot;
-80:                 )
-81:
-82:             raw_copy = raw.detach().clone()
+399:         raise RuntimeError(&quot;FR5_ACTION_NOT_AUTHORIZED&quot;)</pre><p>모델이 예측한 전체 동작 묶음을 보존하고, 소비할 행의 수와 순서는 LeRobot의 큐가 관리한다.</p><p class="locator">plugins/lerobot_strategy_fr5/src/lerobot_strategy_fr5/chunk_tap.py · main23891ce<br>sha256:e0e65f0f76c4bcb1f8af439b2c2b0596cc41c94aa290c4651d537f7d8dcfc85e</p><pre>76:             # Native select_action queues only n_action_steps from this full
+77:             # prediction. Observation must not require those horizons to match.
+78:             expected = int(self.policy.config.chunk_size)
+79:             if raw.shape[1] != expected:
+80:                 raise RuntimeError(
+81:                     f&quot;FR5_CHUNK_LENGTH: {raw.shape[1]} != {expected}&quot;
+82:                 )
 83:
-84:             self._sequence += 1
-85:             self.on_chunk(
-86:                 CapturedPolicyChunk(
-87:                     sequence=self._sequence,
-88:                     raw=raw_copy,
-89:                     raw_sha256=_tensor_sha256(raw_copy),
-90:                 )
-91:             )
-92: </pre><p class="locator">openspec/changes/rollout-learning-loop/handoff.md · main645fe03<br>sha256:e4a610e44def35f6e194c8d6f0ca7489c4a36e7a9c25554fab153f6fe4cdd126</p><pre>36:
+84:             raw_copy = raw.detach().clone()
+85:
+86:             self._sequence += 1
+87:             self.on_chunk(
+88:                 CapturedPolicyChunk(
+89:                     sequence=self._sequence,
+90:                     raw=raw_copy,
+91:                     raw_sha256=_tensor_sha256(raw_copy),
+92:                 )
+93:             )
+94:
+95:             # Critical: return the untouched original tensor.
+96:             return raw
+97:
+98:         self.policy._get_action_chunk = wrapped
+99: </pre><p class="locator">openspec/changes/rollout-learning-loop/handoff.md · main645fe03<br>sha256:e4a610e44def35f6e194c8d6f0ca7489c4a36e7a9c25554fab153f6fe4cdd126</p><pre>36:
 37: ## Physical coherent-delivery qualification — 2026-09-11
 38:
 39: The v5 coherent-delivery successor passed a bounded real-FR5 current-position
