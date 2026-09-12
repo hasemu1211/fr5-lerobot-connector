@@ -32,7 +32,24 @@ ordinary recycle-summary emission and the Scene revision used after source-slot
 consumption require review together. This is a software integration gap, not an
 offline model-quality gate. Existing Rollout owner received bounded CPU-only
 follow-up `msg_a5a75a83eb73`, superseded route binding `msg_6201a8aead66`;
-delivery alone does not prove acceptance or implementation. Root owns integration.
+delivery alone does not prove acceptance or implementation. That unaccepted
+assignment was withdrawn in `msg_a0c3ea643d38` after terminal activity could not
+be verified; root implemented the correction without a parallel writer.
+
+The candidate preserves canonical Scene slots in learned plans, validates the
+release robot identity, omits the ordinary recycle summary, and uses the consumed
+Scene revision for terminal UNKNOWN/fault updates. Learned failure does not emit
+ordinary release evidence or allocate a destination. Focused command
+`direnv exec . python3 -m unittest tests.data_factory.rollout.test_finite_plan tests.data_factory.test_scene_state`
+passes **108 tests in 73.480 s**, exit0. Log
+`.agent-local/work/lerobot-fr5/scene-slot-integration-focused-20260912.log`, SHA-256
+`4d60d2f5982d9267d548cac694a895a23d9559fcd501f0f216948357e2d7d6f2`.
+New fixtures use a temporary real SceneStateStore release/consume lifecycle and
+synthetic transport, covering immutable slotted plan-only, completion/fault,
+stale/foreign/repeated source claims, and malformed/foreign-robot release slots.
+An initial fixture called the diagnostic before the final OneJob poll; correcting
+that test ordering required no diagnostic product change. Independent review and
+fresh physical replay remain unverified; the user's physical pause still applies.
 
 The r9 apparent hardware-stale rejection was traced to the agent-local readiness
 observer taking its clock sample before `transport.snapshot()` spun incoming DDS

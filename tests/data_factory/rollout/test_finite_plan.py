@@ -1993,7 +1993,7 @@ class FinitePlanTest(unittest.TestCase):
         self.assertEqual(transport.sent, [])
         self.assertEqual(transport.cancel_count, 0)
 
-    def make_job(self, *, hardware=True, scene_store=None):
+    def make_job(self, *, hardware=True, scene_store=None, scene_binding=None):
         calls = []
         transport, cell, scene = Transport(), Cell(), scene_store if scene_store is not None else Scene()
         now = [10.]
@@ -2010,6 +2010,8 @@ class FinitePlanTest(unittest.TestCase):
         binding = ({"scene_state_digest": snapshot["scene_state_digest"],
                     "revision": snapshot["scene_state"]["revision"], "object_instance_id": "cube-1"}
                    if snapshot is not None else SCENE)
+        if scene_binding is not None:
+            binding = copy.deepcopy(scene_binding)
         planned = job.plan_learned("run", source(), binding, inference, observation(), **OPTIONS)
         self.assertTrue(planned["ok"], planned)
         return job, executor, transport, cell, scene, now, calls
@@ -2149,6 +2151,126 @@ class FinitePlanTest(unittest.TestCase):
                 src["endpoint_bindings_digest"] = canonical_digest(src["endpoint_bindings"])
                 with self.assertRaises(ContractError):
                     compile_program(src, proposal())
+
+    @staticmethod
+    def slotted_scene(directory):
+        from tools.data_factory.scene_state import SceneStateStore, release_slot
+        store = SceneStateStore(directory, "fr5-lab-a")
+        pose = {"place_id": "PLACE_A", "yaw_deg": 0., "x_mm": 10., "y_mm": 20.}
+        start = store.update_object(instance_id="cube-1", object_profile_id="cube",
+            state="ON_SURFACE", pose=pose, source="HUMAN", updated_by="fixture")
+        slot = release_slot(robot_system_id="fr5-lab-a", pose=pose,
+            object_profile_id="cube", exclusion_geometry_digest=canonical_digest("box"),
+            role="DESTINATION_THEN_NEXT_SOURCE")
+        evidence = {"schema_version": "data_factory.recycle_release_evidence.v1",
+            "run_id": "previous", "plan_digest": canonical_digest("previous-plan"),
+            "release_slot_id": slot["slot_id"], "expected_scene_state_digest": start["scene_state_digest"],
+            "expected_scene_revision": start["scene_state"]["revision"],
+            "gripper_reference_m": .01, "gripper_feedback_m": .01,
+            "terminal_phases": ["RECYCLE_APPROACH_PTP", "LOWER_LIN", "GRIPPER_OPEN", "RETREAT_LIN", "SAFE_POSE_PTP"],
+            "post_retreat_snapshot_digest": canonical_digest("snapshot"),
+            "next_start_tolerance_rad": .01, "human_verdict": "LANDED"}
+        landed = store.transition_release(instance_id="cube-1", release_slot=slot, evidence=evidence,
+            updated_by="fixture", expected_digest=start["scene_state_digest"],
+            expected_revision=start["scene_state"]["revision"], allowed_next_run_id="run")
+        destination = release_slot(robot_system_id="fr5-lab-a", pose={**pose, "place_id": "PLACE_B"},
+            object_profile_id="cube", exclusion_geometry_digest=slot["exclusion_geometry_digest"])
+        binding = {"scene_state_digest": landed["scene_state_digest"],
+            "revision": landed["scene_state"]["revision"], "object_instance_id": "cube-1",
+            "release_slot": destination, "source_slot": {"slot_id": slot["slot_id"],
+                "slot_digest": canonical_digest(landed["scene_state"]["slot_allocations"][slot["slot_id"]]),
+                "allowed_run_id": "run"}}
+        return store, binding
+
+    def test_slotted_learned_plan_preserves_scope_without_recycle_claim(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, binding = self.slotted_scene(directory)
+            before = store._path().read_bytes()
+            with mock.patch(__name__ + ".source", return_value=cross_workspace_source()):
+                job, executor, transport, cell, _, _, calls = self.make_job(scene_store=store, scene_binding=binding)
+            self.assertEqual(job.plan_envelope["plan"]["scene_binding"], binding)
+            self.assertNotIn("recycle", job.plan_envelope["operator_summary"])
+            self.assertIsNone(executor.runs["run"]["recycle_plan_digest"])
+            self.assertEqual(store._path().read_bytes(), before)
+            self.assertEqual(transport.sent, [])
+            self.assertTrue(cell.ready)
+            self.assertFalse(any(target == "recorder" for target, _ in calls))
+            original = copy.deepcopy(job.plan_envelope["plan"])
+            binding["release_slot"]["pose"]["x_mm"] += 1
+            self.assertEqual(job.plan_envelope["plan"], original)
+
+    def test_slotted_learned_completion_and_fault_use_consumed_revision(self):
+        for fail in (False, True):
+            with self.subTest(fail=fail), tempfile.TemporaryDirectory() as directory:
+                store, binding = self.slotted_scene(directory)
+                job, executor, transport, _, _, _, _ = self.make_job(scene_store=store, scene_binding=binding)
+                self.assertTrue(job.approve(APPROVAL)["ok"])
+                self.assertTrue(job.start()["ok"])
+                consumed = store.read()
+                self.assertEqual(consumed["revision"], binding["revision"] + 1)
+                self.assertEqual(consumed["slot_allocations"][binding["source_slot"]["slot_id"]]["state"], "CONSUMED_PENDING_REVIEW")
+                self.assertEqual(job.poll()["state"], "PRECONTACT_HUMAN")
+                self.assertTrue(job.confirm("operator")["ok"])
+                if fail:
+                    transport.failure = "SYNTHETIC_FAILURE"
+                    result = job.poll()
+                else:
+                    self.assertEqual(job.poll()["state"], "LEARNED_CHUNK_COMPLETE")
+                    self.assertTrue(job.semantic_verdict("PASS", "operator")["ok"])
+                    result = job.poll()
+                actual = store.read()
+                self.assertEqual(actual["revision"], consumed["revision"] + 1)
+                self.assertEqual(actual["objects"]["cube-1"]["state"], "UNKNOWN")
+                self.assertEqual(actual["slot_allocations"], consumed["slot_allocations"])
+                self.assertNotIn("release_evidence", executor.runs["run"]["execution"])
+                self.assertNotIn("scene_state_error", result["execution_evidence"])
+                self.assertEqual(learned_run_diagnostic(result)["task_effectiveness"], "UNKNOWN")
+
+    def test_slotted_learned_source_conflicts_send_no_goal(self):
+        for corruption in ("run", "slot", "scene", "consumed"):
+            with self.subTest(corruption=corruption), tempfile.TemporaryDirectory() as directory:
+                store, binding = self.slotted_scene(directory)
+                if corruption == "run":
+                    binding["source_slot"]["allowed_run_id"] = "other"
+                elif corruption == "slot":
+                    binding["source_slot"]["slot_digest"] = canonical_digest("other")
+                elif corruption == "scene":
+                    binding["scene_state_digest"] = canonical_digest("other")
+                job, _, transport, _, _, _, _ = self.make_job(scene_store=store, scene_binding=binding)
+                if corruption == "consumed":
+                    store.consume_next_source(slot_id=binding["source_slot"]["slot_id"], run_id="run",
+                        expected_scene_digest=binding["scene_state_digest"], expected_slot_digest=binding["source_slot"]["slot_digest"])
+                before = store._path().read_bytes()
+                self.assertTrue(job.approve(APPROVAL)["ok"])
+                result = job.start()
+                self.assertFalse(result["ok"], result)
+                self.assertIn(result["code"], {"SCENE_SLOT_NEXT_RUN", "SCENE_SLOT_CHANGED", "SCENE_STATE_CHANGED"})
+                self.assertEqual(transport.sent, [])
+                self.assertEqual(store._path().read_bytes(), before)
+
+    def test_slotted_learned_plan_rejects_malformed_or_foreign_slots(self):
+        from tools.data_factory.scene_state import release_slot
+        for corruption in ("unknown", "digest", "robot"):
+            with self.subTest(corruption=corruption), tempfile.TemporaryDirectory() as directory:
+                store, binding = self.slotted_scene(directory)
+                if corruption == "unknown":
+                    binding["source_slot"]["unrecognized"] = True
+                elif corruption == "digest":
+                    binding["release_slot"]["slot_id"] = canonical_digest("wrong")
+                else:
+                    slot = binding["release_slot"]
+                    binding["release_slot"] = release_slot(robot_system_id="other-robot",
+                        pose=slot["pose"], object_profile_id=slot["object_profile_id"],
+                        exclusion_geometry_digest=slot["exclusion_geometry_digest"])
+                transport = Transport()
+                executor = PickupExecutor(transport, source_clock=lambda: 10.)
+                before = store._path().read_bytes()
+                with self.assertRaises(ContractError):
+                    executor._compile_plan({"run_id": "run", "motion_program": compile_program(source(), proposal()),
+                                            "scene_binding": binding})
+                self.assertEqual(transport.sent, [])
+                self.assertEqual(transport.calls, [])
+                self.assertEqual(store._path().read_bytes(), before)
 
     def test_native_source_still_rejects_unknown_or_nested_program_versions(self):
         for schema in ("fr5.motion_program.v3", "fr5.motion_program.v999", "fr5.learned_motion_program.v1"):

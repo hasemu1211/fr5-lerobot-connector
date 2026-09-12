@@ -568,8 +568,13 @@ class PickupExecutor:
         proposal = motion_program.get("learned_proposal")
         if proposal is not None:
             from tools.data_factory.rollout.finite_plan import check_freshness
-            if self.motion_only_binding_digest is not None or set(scene_binding) != {"scene_state_digest", "revision", "object_instance_id"}:
+            if self.motion_only_binding_digest is not None:
                 raise ContractError("LEARNED_SCENE_SCOPE")
+            # Retain the normal resolver's slots in the exact plan/grant. Their
+            # presence is not evidence that this finite output placed anything.
+            if "release_slot" in scene_binding:
+                from tools.data_factory.scene_state import validate_release_slot
+                validate_release_slot(scene_binding["release_slot"], motion_program["robot_system_id"])
             check_freshness(proposal, self.source_clock())
         action_graph = self._validated_preflight(motion_program)
         observed = self.transport.snapshot(motion_program["planning"]["max_joint_state_age_s"])
@@ -910,7 +915,7 @@ class PickupExecutor:
             from tools.data_factory.rollout.finite_plan import proposal_summary
             operator_summary["learned"] = proposal_summary(proposal)
         recycle_plan_digest = None
-        if "release_slot" in scene_binding:
+        if proposal is None and "release_slot" in scene_binding:
             recycle_steps = [step for step in planned_steps if step["phase"] in RECYCLE_PHASES]
             recycle_plan_digest = canonical_digest({
                 "schema_version": "fr5.recycle_plan.v1",
@@ -1597,7 +1602,7 @@ class PickupExecutor:
                 execution["scene_transition"] = self.scene_state_store.update_object(
                     instance_id=binding["object_instance_id"], object_profile_id=item["object_profile_id"],
                     state="UNKNOWN", source="ROBOT_ACTION", updated_by="pickup-executor",
-                    expected_revision=binding["revision"],
+                    expected_revision=execution["scene_revision"],
                 )
             except Exception:
                 self._fault(run, "LEARNED_SCENE_UNCERTAIN")
@@ -1806,14 +1811,14 @@ class PickupExecutor:
             if self.scene_state_store is not None and isinstance(item, dict):
                 scene_options = {"blocking": False} if "learned_proposal" in run["plan"] else {}
                 slot = binding.get("release_slot")
-                if slot is None:
+                if slot is None or "learned_proposal" in run["plan"]:
                     execution["scene_transition"] = self.scene_state_store.update_object(
                         instance_id=binding["object_instance_id"],
                         object_profile_id=item["object_profile_id"],
                         state="UNKNOWN",
                         source="ROBOT_ACTION",
                         updated_by="pickup-executor",
-                        expected_revision=binding["revision"], **scene_options,
+                        expected_revision=execution.get("scene_revision", binding["revision"]), **scene_options,
                     )
                 else:
                     snapshot = execution.get("snapshot")

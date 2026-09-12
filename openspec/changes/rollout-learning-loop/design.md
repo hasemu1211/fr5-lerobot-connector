@@ -254,6 +254,19 @@ action error and task success remains unmeasured here.
 
 ## Original-transition recollection (software integration)
 
+### Canonical Scene slots remain part of learned execution scope
+
+The actual native r10 plan-only call exposed a stale three-key Scene allowlist:
+the ordinary resolver already supplies release and previously landed source
+slots. Preserve that canonical binding in the learned plan, precommit digest and
+task grant, including the release slot's robot identity. The existing executor
+consumes a source slot once after approval through Scene CAS; subsequent learned
+completion/failure uses that consumed revision, not the earlier plan revision.
+Merely retaining a release slot must not emit an ordinary recycle plan summary
+or release evidence. Finite learned completion/failure keeps object state UNKNOWN;
+qualified mechanical placement remains a separate measured effect. No new Scene
+store, motion owner, tolerance or authority is introduced.
+
 The existing acquisition recommendation joins a human-reviewed finite learned
 chunk to its original native v4 source program, preapproval resolver receipts,
 and episode instruction binding. Retain the destination resolver receipt in the
