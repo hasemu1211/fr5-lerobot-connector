@@ -33,17 +33,43 @@ loop: semantic failure remains distinct from causal data shortage, and advice
 does not grant motion, semantic success or training authority. No real learned
 Pick or targeted-recollection effectiveness is claimed.
 
-Resource status changed again after the stopped r1 below. Learning's isolated
-candidate `fefdc323bddbca0a635c8cb7341ae66f93707288` releases recreated EVAL
-workers after evaluation and started a distinct `continue-18000-r2` from the
-original 12k. Root observed supervisor3517820 holding the existing heavy-work
-lock and actual trainer3517887 performing updates. This candidate is not yet
-integrated or independently qualified by root. A root model-first probe exited
-at that lock before model load; robot bring-up was not attempted. Camera-only
-measurements at21:25 KST passed the existing brightness threshold, but cannot
-authorize a later light state. Orca app327728 remains running while its runtime
-reports disconnected/starting; queries and `open` timed out. Do not infer lane
-death, duplicate work or approved runtime recovery from these tool failures.
+### Latest learning checkpoint: 18k saved; paired comparison remains separate
+
+Learning's `fefdc323bddbca0a635c8cb7341ae66f93707288` is integrated as
+`5b9e438`: recreated EVAL workers terminate after evaluation, while TRAIN stays
+persistent and separate worker seeding preserves policy RNG. Root inspected
+the change against the installed LeRobot TRAIN-then-EVAL construction and ran
+`direnv exec . env OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python3 -m unittest tests.test_training_continuation`
+on integrated main: 18 tests PASS in 36.970 s, exit 0. Log
+`.agent-local/work/lerobot-fr5/continuation-main-eval-lifetime-20260912.log`, SHA-256
+`6935e2cee6481f463142f002473afc7e9fa00192ac7c07518bee5091d9aee83c`.
+The scope covers native CPU continuation, worker lifetime, sample/RNG/state
+preservation and recovery; full discovery was not repeated for this bounded seam.
+
+The distinct `smolvla-pickplace-rhythm40-continue-18000-r2` completed with exit 0
+in 1,310.215 s. Its owner result reports parent/inventory unchanged; root read
+that receipt and the actual complete 18k model, optimizer, scheduler and cursor
+files. The final cursor is 71,997 examples, epoch 3 offset 5,100 of 22,299 TRAIN
+frames; scheduler horizon remains 12k and LR 2.5e-6. This is successful native
+continuation/save, not improved policy quality or physical success. The owner
+retains saved-state evidence and sequential paired 15k/18k evaluation in its
+existing learning-evaluation-loop work directory. GPU comparison is independent
+of the original 12k rollout candidate and does not create a rollout gate.
+
+Root's r7 model-first probe loaded and warmed the original 12k, then waited at
+`READY_FOR_RUNTIME`; no `PROBE` input or new device bring-up was issued. Root
+terminated that exact idle process after storage cleanup diverted the turn,
+verified PID3609616/flock3598493 gone and GPU released, then returned the resource
+to Learning in `msg_8ae9f56667a6`. Sequential comparison supervisor3619012 and
+15k evaluator3619077 were subsequently observed live. Do not reuse r7 as fresh
+runtime evidence. Orca message transport is responding again; the earlier
+disconnection below is historical, not a reason to duplicate existing owners.
+
+Camera-only measurements at21:25 KST passed the existing brightness threshold,
+but cannot authorize a later light state. Next root consumer remains a fresh
+native-input normal OneJob plan-only followed by the existing qualified live
+path; real inference-driven motion consumes the system's current illumination
+check. No personal image judgment or offline model metric becomes a new gate.
 
 ### Latest resource result: continuation stopped; original 12k remains usable
 
