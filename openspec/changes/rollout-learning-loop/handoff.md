@@ -15,9 +15,16 @@ are isolated under `.agent-local/work/lerobot-fr5/learning-rhythm40-20260912`.
 Root's proposal-evidence slice optionally connects the actual existing chunk
 bridge to the existing sidecar before validation. A read-only diagnostic replays
 the numerical validator and preserves incomplete attempts, original errors and
-no-authority semantics. Combined plugin/evidence/recommendation regression:
-67 tests PASS. Independent review and the whole-repository stable gate remain
-pending. This does not connect the rollout CLI to physical execution: plugin
+no-authority semantics. Independent review of `645fe03` replayed 67 passing tests
+and found two evidence defects: candidate-publication failure could mask the
+original validation error, and retained processed bytes were not numerically
+bound to proposed actions. The correction preserves rejection priority even
+when candidate storage fails, projects/retains one tensor snapshot, and replays
+a shared pure gripper projection while comparing all six arm values exactly.
+The corrected plugin/evidence/recommendation regression passes 74 tests, including
+both falsifiers and alternate float encodings. Fresh review of the correction
+and the whole-repository stable gate remain pending. Hashes do not authenticate
+an externally fabricated sidecar. This does not connect the rollout CLI to physical execution: plugin
 `send_action` remains blocked and source/destination-bound pick-place failure
 recollection remains open. Do not treat proposal diagnostics as terminal
 execution traces or training targets.

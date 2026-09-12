@@ -71,6 +71,69 @@ class ProposalEvidenceTest(unittest.TestCase):
                 record["event_digest"] = canonical_digest(body)
         self.path.write_text("".join(json.dumps(r) + "\n" for r in records))
 
+    def rebind_candidate(self, records):
+        self.rewrite(records, redigest=True)
+        records = self.records()
+        records[2]["payload"]["candidate_event_digest"] = records[1]["event_digest"]
+        self.rewrite(records, redigest=True)
+
+    def test_redigested_processed_bytes_must_match_projected_actions(self):
+        self.create()
+        original = self.records()
+        for column, value in ((0, .25), (6, .02)):
+            with self.subTest(column=column):
+                records = copy.deepcopy(original)
+                tensor = records[1]["payload"]["processed_chunk"]
+                data = np.frombuffer(bytes.fromhex(tensor["data_hex"]), dtype=tensor["dtype"]).copy()
+                data[column] = value
+                tensor.update(data_hex=data.tobytes().hex(), sha256=hashlib.sha256(data.tobytes()).hexdigest())
+                self.rebind_candidate(records)
+                with self.assertRaisesRegex(ContractError, "ROLLOUT_PROPOSAL_EVIDENCE_INVALID") as caught:
+                    inspect_proposal_evidence(self.path)
+                self.assertEqual(str(caught.exception.__cause__), "ROLLOUT_PROPOSAL_DIAGNOSTIC_BINDING")
+
+    def test_redigested_projection_statistics_must_match_bytes(self):
+        self.create()
+        records = self.records()
+        records[1]["payload"]["projection"]["gripper_projection_rows"] = 0
+        self.rebind_candidate(records)
+        with self.assertRaisesRegex(ContractError, "ROLLOUT_PROPOSAL_EVIDENCE_INVALID") as caught:
+            inspect_proposal_evidence(self.path)
+        self.assertEqual(str(caught.exception.__cause__), "ROLLOUT_PROPOSAL_DIAGNOSTIC_BINDING")
+
+    def test_supported_float_encodings_and_shapes_replay_exactly(self):
+        for dtype in (torch.float16, torch.float32, torch.float64):
+            for shape in ((2, 7), (1, 2, 7)):
+                with self.subTest(dtype=dtype, shape=shape):
+                    self.path = Path(self.temp.name) / f"{dtype}-{len(shape)}.jsonl"
+                    processed = self.raw.to(dtype).reshape(shape)
+                    with JsonlEvidenceSink(self.path, "synthetic-run") as sink:
+                        build_finite_proposal(self.capture, processed, evidence_sink=sink, **self.kwargs)
+                    self.assertEqual(inspect_proposal_evidence(self.path)["diagnostics"][0]["diagnostic"]["validation_status"], "VALID")
+
+    def test_big_endian_processed_encoding_replays_exactly(self):
+        self.create()
+        records = self.records()
+        tensor = records[1]["payload"]["processed_chunk"]
+        data = np.frombuffer(bytes.fromhex(tensor["data_hex"]), dtype=tensor["dtype"]).astype(">f4").tobytes()
+        tensor.update(dtype=">f4", data_hex=data.hex(), sha256=hashlib.sha256(data).hexdigest())
+        self.rebind_candidate(records)
+        self.assertEqual(inspect_proposal_evidence(self.path)["diagnostics"][0]["diagnostic"]["validation_status"], "VALID")
+
+    def test_projection_and_retention_use_same_input_snapshot(self):
+        from lerobot_strategy_fr5 import proposal_bridge
+        processed = self.raw.clone()
+        original = proposal_bridge.observation_digest
+        def mutate(*args, **kwargs):
+            processed[0, 0, 0] = .25
+            return original(*args, **kwargs)
+        with JsonlEvidenceSink(self.path, "synthetic-run") as sink, patch.object(
+                proposal_bridge, "observation_digest", side_effect=mutate):
+            proposal, _ = build_finite_proposal(self.capture, processed, evidence_sink=sink, **self.kwargs)
+        self.assertEqual(proposal["actions"][0][0], 0.)
+        self.assertEqual(float(processed[0, 0, 0]), .25)
+        self.assertEqual(inspect_proposal_evidence(self.path)["diagnostics"][0]["diagnostic"]["validation_status"], "VALID")
+
     def test_same_proposal_with_and_without_tap_and_no_input_mutation(self):
         before = self.raw.clone()
         expected = build_finite_proposal(self.capture, self.raw, **self.kwargs)
@@ -183,6 +246,31 @@ class ProposalEvidenceTest(unittest.TestCase):
         self.assertIs(caught.exception, rejected)
         self.assertIn("FR5_EVIDENCE_PUBLICATION_FAILED", rejected.__notes__[0])
         self.assertEqual(inspect_proposal_evidence(self.path)["diagnostics"], [])
+
+    def test_candidate_storage_error_cannot_mask_numerical_rejection(self):
+        from lerobot_strategy_fr5 import proposal_bridge
+        processed = self.raw.clone()
+        processed[0, 0, 0] = .1
+        with JsonlEvidenceSink(self.path, "synthetic-run") as sink, patch.object(
+                sink, "emit", side_effect=OSError("disk full")), patch.object(
+                proposal_bridge, "validate_proposal", wraps=proposal_bridge.validate_proposal) as validator:
+            with self.assertRaisesRegex(ContractError, "LEARNED_VELOCITY_LIMIT") as caught:
+                build_finite_proposal(self.capture, processed, evidence_sink=sink, **self.kwargs)
+            validator.assert_called_once()
+            self.assertIn("FR5_EVIDENCE_PUBLICATION_FAILED: OSError", caught.exception.__notes__)
+        self.assertEqual(self.path.read_bytes(), b"")
+
+    def test_candidate_storage_error_still_blocks_valid_proposal(self):
+        from lerobot_strategy_fr5 import proposal_bridge
+        error = OSError("disk full")
+        with JsonlEvidenceSink(self.path, "synthetic-run") as sink, patch.object(
+                sink, "emit", side_effect=error), patch.object(
+                proposal_bridge, "validate_proposal", wraps=proposal_bridge.validate_proposal) as validator:
+            with self.assertRaises(OSError) as caught:
+                build_finite_proposal(self.capture, self.raw, evidence_sink=sink, **self.kwargs)
+            self.assertIs(caught.exception, error)
+            validator.assert_called_once()
+        self.assertEqual(self.path.read_bytes(), b"")
 
     def test_capture_mutation_is_not_silently_rebound(self):
         self.capture.raw[0, 0, 0] = 1.

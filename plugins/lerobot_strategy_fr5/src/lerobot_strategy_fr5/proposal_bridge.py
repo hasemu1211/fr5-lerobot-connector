@@ -255,6 +255,9 @@ def build_finite_proposal(
     except KeyError as exc:
         raise RuntimeError("FR5_INITIAL_STATE") from exc
 
+    # Project and retain one snapshot, not two reads of caller-owned storage.
+    if isinstance(processed_chunk, torch.Tensor):
+        processed_chunk = processed_chunk.detach().clone()
     actions, projection = project_processed_chunk(
         processed_chunk,
         gripper_upper_m=gripper_upper_m,
@@ -310,19 +313,25 @@ def build_finite_proposal(
     # A candidate is not an admitted proposal or an execution trace. Preserve it
     # before the unchanged validator can reject it (e.g. velocity limits).
     candidate_event = None
+    candidate_error = None
     if evidence_sink is not None:
-        raw = _tensor_record(capture.raw)
-        if raw["sha256"] != capture.raw_sha256:
-            raise RuntimeError("FR5_CAPTURE_DIGEST_CHANGED")
-        candidate_event = evidence_sink.emit("PROPOSAL_CANDIDATE", {
-            "schema_version": "data_factory.rollout_proposal_candidate.v1",
-            "chunk_sequence": capture.sequence,
-            "raw_chunk": raw,
-            "processed_chunk": _tensor_record(processed_chunk),
-            "observation_evidence": observation_evidence,
-            "proposal_candidate": proposal,
-            "projection": projection,
-        })
+        try:
+            raw = _tensor_record(capture.raw)
+            if raw["sha256"] != capture.raw_sha256:
+                raise RuntimeError("FR5_CAPTURE_DIGEST_CHANGED")
+            candidate_event = evidence_sink.emit("PROPOSAL_CANDIDATE", {
+                "schema_version": "data_factory.rollout_proposal_candidate.v1",
+                "chunk_sequence": capture.sequence,
+                "raw_chunk": raw,
+                "processed_chunk": _tensor_record(processed_chunk),
+                "observation_evidence": observation_evidence,
+                "proposal_candidate": proposal,
+                "projection": projection,
+            })
+        except Exception as exc:
+            # Still run the unchanged validator: storage must not mask its
+            # rejection. A valid proposal must also fail closed on this error.
+            candidate_error = exc
 
     def publish_validation(status: str, code: str | None):
         if evidence_sink is not None:
@@ -340,6 +349,8 @@ def build_finite_proposal(
         proposal = validate_proposal(proposal)
     except Exception as exc:
         try:
+            if candidate_error is not None:
+                raise candidate_error
             publish_validation(
                 "BLOCKED" if isinstance(exc, ContractError) else "ERROR",
                 str(exc) if isinstance(exc, ContractError) else type(exc).__name__,
@@ -349,6 +360,8 @@ def build_finite_proposal(
             # candidate without a matching result remains explicitly incomplete.
             exc.add_note(f"FR5_EVIDENCE_PUBLICATION_FAILED: {type(evidence_error).__name__}")
         raise
+    if candidate_error is not None:
+        raise candidate_error
     publish_validation("VALID", None)
 
     evidence = {

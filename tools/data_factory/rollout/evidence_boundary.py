@@ -39,6 +39,8 @@ def build_proposal_diagnostic(candidate: Mapping[str, Any], validation: Mapping[
     """
     import hashlib
     import math
+    import struct
+    from .action_projection import project_gripper_position
     from .finite_plan import validate_proposal
 
     code = "ROLLOUT_PROPOSAL_DIAGNOSTIC_BINDING"
@@ -71,6 +73,9 @@ def build_proposal_diagnostic(candidate: Mapping[str, Any], validation: Mapping[
             if (len(raw) != math.prod(shape) * sizes[tensor["dtype"]]
                     or hashlib.sha256(raw).hexdigest() != tensor["sha256"]):
                 raise ContractError(code)
+            if name == "processed_chunk":
+                scalar = {"2": "e", "4": "f", "8": "d"}[tensor["dtype"][-1]]
+                processed_rows = list(struct.iter_unpack(tensor["dtype"][0] + scalar * 7, raw))
         proposal = c["proposal_candidate"]
         if proposal["proposal_digest"] != canonical_digest({k: v for k, v in proposal.items() if k != "proposal_digest"}):
             raise ContractError(code)
@@ -80,6 +85,27 @@ def build_proposal_diagnostic(candidate: Mapping[str, Any], validation: Mapping[
                 or any(c[k]["shape"][-2] != len(proposal["actions"])
                        for k in ("raw_chunk", "processed_chunk"))
                 or c["projection"]["projected_actions_digest"] != canonical_digest(proposal["actions"])):
+            raise ContractError(code)
+        # Hashes bind bytes, not their claimed meaning. Replay the same pure
+        # gripper projection as the adapter; all six arm values stay exact.
+        projection = c["projection"]
+        projected_rows, deltas = [], []
+        for row in processed_rows:
+            if not all(math.isfinite(v) for v in row):
+                raise ContractError(code)
+            gripper = project_gripper_position(
+                row[-1], upper_m=projection["gripper_upper_m"],
+                projection_quanta=projection["gripper_projection_quanta"],
+            )["projected_m"]
+            projected_rows.append([*row[:6], gripper])
+            deltas.append(abs(gripper - row[-1]))
+        if (projected_rows != proposal["actions"] or projection != {
+                "rows": len(projected_rows),
+                "gripper_projection_rows": sum(delta > 0 for delta in deltas),
+                "max_gripper_projection_delta_m": max(deltas),
+                "gripper_upper_m": projection["gripper_upper_m"],
+                "gripper_projection_quanta": projection["gripper_projection_quanta"],
+                "projected_actions_digest": canonical_digest(projected_rows)}):
             raise ContractError(code)
         try:
             validate_proposal(proposal)

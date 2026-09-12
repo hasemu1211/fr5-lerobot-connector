@@ -10,6 +10,7 @@ from lerobot.processor import (
     RobotAction,
     RobotActionProcessorStep,
 )
+from tools.data_factory.rollout.action_projection import project_gripper_position
 
 GRIPPER_KEY = "finger_right_joint.pos"
 
@@ -35,28 +36,12 @@ def project_gripper_action(
     if GRIPPER_KEY not in requested:
         raise ValueError("FR5_GRIPPER_ACTION_MISSING")
 
-    raw = requested[GRIPPER_KEY]
-    quantum = upper_m / 100.0
-    slack = projection_quanta * quantum
-
-    if not -slack <= raw <= upper_m + slack:
-        raise ValueError(f"FR5_GRIPPER_ACTION_OUT_OF_RANGE: {raw}")
-
-    bounded = min(upper_m, max(0.0, raw))
-    percent = math.floor(bounded * 100.0 / upper_m + 0.5)
-    projected = percent * upper_m / 100.0
-
+    metadata = project_gripper_position(
+        requested[GRIPPER_KEY], upper_m=upper_m, projection_quanta=projection_quanta,
+    )
     processed = dict(requested)
-    processed[GRIPPER_KEY] = projected
-
-    return processed, {
-        "requested_m": raw,
-        "bounded_m": bounded,
-        "fairino_percent": percent,
-        "projected_m": projected,
-        "quantum_m": quantum,
-        "projection_slack_m": slack,
-    }
+    processed[GRIPPER_KEY] = metadata["projected_m"]
+    return processed, metadata
 
 
 @ProcessorStepRegistry.register("fr5/bounded_gripper_projection")
