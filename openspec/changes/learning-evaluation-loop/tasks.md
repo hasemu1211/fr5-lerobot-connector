@@ -32,6 +32,7 @@
 - [x] Measure paired saved-postprocessor action errors on the frozen observation cohort, separating arm and gripper units and preserving native temporal alignment/padding; qualify any resulting data-utility interpretation.
 - [x] Expose admitted sampled physical-action evaluation through the existing public consumer and establish native inference equivalence, retaining default flow-loss reports and explicit sparse coverage.
 - [x] Distinguish stochastic action-sampling sensitivity from persistent per-joint/chunk errors before choosing further training or data-utility comparisons.
+- [x] Diagnose a fixed balanced TRAIN subset against the retained heldout cohort using one checkpoint, native per-axis flow loss and sampled physical residuals; preserve partition/normalization contracts, reuse existing evidence and use the scoped gap to prioritize the next learning hypothesis without causal or physical-success claims.
 - [ ] Establish reproducible evidence for the next acquisition or selection decision, separating sampled policy errors from recorded condition coverage.
 
 Runtime checkpoints, attempts, blockers and numerical measurements belong in Orca and their native evidence artifacts, not this outcome checklist.
