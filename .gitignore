@@ -28,3 +28,4 @@ rosbag2_*/
 .env
 /config/fr5.env
 /config/time-offsets.json
+*.egg-info/

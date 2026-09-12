@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lerobot_strategy_fr5"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["lerobot==0.6.1"]
+
+[project.scripts]
+fr5-rollout = "lerobot_strategy_fr5.rollout:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
