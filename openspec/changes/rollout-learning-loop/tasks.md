@@ -8,7 +8,7 @@ bounded continuity question only; learned task success remains unproven.
 - [ ] Connect the existing LeRobot Sync/chunk seam to the sole FR5 execution owner with actual transport evidence and qualified teardown, without a second queue or per-row publisher.
 - [ ] Preserve original source, destination and instruction direction through failed pick-place diagnosis into existing recommendation/authoring; do not merely remove the pickup-only guard.
 - [ ] Compare the newly trained pick-place checkpoints on the same approved heldout observations/noise and qualify the selected output through plan-only before physical execution.
-- [ ] Independently review the integrated plugin/diagnostic change and run the repository-wide regression at the stable integration gate; focused CPU tests are not real rollout success.
+- [ ] Independently review the integrated plugin/diagnostic change and verify regressions according to actual impact: focused producer/consumer checks by default; whole-repository discovery for cross-owner integration or uncertain impact, not every correction or push. Preserve exact cutoffs and coverage; CPU tests are not real rollout success.
 
 ## Native processor readiness
 
