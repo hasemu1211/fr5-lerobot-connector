@@ -1304,3 +1304,28 @@ declared compatible because feature names and tensor shapes match.
 - **THEN** the existing execution boundary SHALL require matching current model and qualification evidence and a newly bound plan before sending motion
 - **AND** an old approval or historical model digest SHALL NOT be rewritten or accepted as authorization for the replacement
 - **AND** the prior model and configuration SHALL remain recoverable without rewriting datasets, checkpoints or past run evidence
+### Requirement: Upstream policy ownership and honest preexecution diagnosis
+
+The integration SHALL reuse the pinned LeRobot inference, saved processors and
+action queue. FR5 SHALL retain one existing execution/cancellation owner rather
+than introduce another raw command publisher. Recording instrumentation SHALL NOT
+invoke stateful policy processors again or change the consumed policy output.
+
+A retained numerical proposal attempt SHALL distinguish unapproved candidates
+from validated proposals and terminal execution traces. It SHALL preserve the
+originating observation identity, raw and processed output, projected candidate
+and validator result. A preexecution diagnostic SHALL NOT imply manipulation
+failure, data deficiency, whole-run non-dispatch or execution/training authority.
+
+#### Scenario: Numerical velocity rejection survives proposal construction
+
+- **WHEN** the existing validator rejects a retained candidate for excessive action velocity
+- **THEN** the same exception SHALL reach the caller and the candidate/result SHALL remain available for read-only diagnosis
+- **AND** the diagnostic SHALL keep task outcome NOT_EVALUATED and data deficit UNKNOWN
+- **AND** missing result evidence SHALL remain incomplete rather than imply success
+
+#### Scenario: LeRobot supplies an already processed action chunk
+
+- **WHEN** the bridge records its raw and postprocessed output for diagnosis
+- **THEN** instrumentation SHALL preserve output values and originating observation identity without another processor call
+- **AND** validation success alone SHALL NOT grant FR5 motion or training authority

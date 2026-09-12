@@ -1,6 +1,14 @@
-Session transition: see [handoff.md](handoff.md) for the 2026-09-09 candidate,
-live regression handle and unqualified physical boundary. Revalidate its runtime
-observations; this pointer does not mark the unfinished tasks below complete.
+Session transition: see [handoff.md](handoff.md) for version-scoped evidence.
+The September 11 v5 hold supersedes the September 9 failed candidate for that
+bounded continuity question only; learned task success remains unproven.
+
+## Current LeRobot pick-place connection
+
+- [x] Preserve raw/processed chunk and originating observation-bound candidate before the existing proposal validator; replay a distinct read-only preexecution diagnostic without fabricating a terminal lifecycle or task failure. Focused producer/consumer regression covers storage failure, mutation, incomplete logs and unchanged outputs.
+- [ ] Connect the existing LeRobot Sync/chunk seam to the sole FR5 execution owner with actual transport evidence and qualified teardown, without a second queue or per-row publisher.
+- [ ] Preserve original source, destination and instruction direction through failed pick-place diagnosis into existing recommendation/authoring; do not merely remove the pickup-only guard.
+- [ ] Compare the newly trained pick-place checkpoints on the same approved heldout observations/noise and qualify the selected output through plan-only before physical execution.
+- [ ] Independently review the integrated plugin/diagnostic change and run the repository-wide regression at the stable integration gate; focused CPU tests are not real rollout success.
 
 ## Native processor readiness
 

@@ -1,5 +1,33 @@
 # Coordinator handoff — 2026-09-09
 
+## September 12 continuation: LeRobot pick-place integration
+
+The local handoff `.agent-local/wiki/FR5_LeRobot_Rollout_Handoff_20260912.md`
+matched all 19 supplied source fingerprints at inspection. The chosen dataset is
+the separately approved bidirectional pick-place rhythm40 set, TRAIN 0–31 and
+heldout 32–39, raw RGB without augmentation. Actual training reached 12,000 steps
+and printed `End of training` at 18:40:50 KST; 3k/6k/9k/12k saved checkpoints
+exist. This is not evidence of task success or a best checkpoint. Learning's
+existing owner now compares identical heldout observations and paired noise,
+one model/process at a time, without training or device effects. Its outputs
+are isolated under `.agent-local/work/lerobot-fr5/learning-rhythm40-20260912`.
+
+Root's proposal-evidence slice optionally connects the actual existing chunk
+bridge to the existing sidecar before validation. A read-only diagnostic replays
+the numerical validator and preserves incomplete attempts, original errors and
+no-authority semantics. Combined plugin/evidence/recommendation regression:
+67 tests PASS. Independent review and the whole-repository stable gate remain
+pending. This does not connect the rollout CLI to physical execution: plugin
+`send_action` remains blocked and source/destination-bound pick-place failure
+recollection remains open. Do not treat proposal diagnostics as terminal
+execution traces or training targets.
+
+Preexisting user plugin edits were retained; a recoverable source copy is under
+`.agent-local/work/lerobot-fr5/pre-attempt-evidence-2UjzcV`. Original observations,
+datasets, review/approval artifacts, checkpoints and vendor working tree were
+not modified by this slice. The September 11 hold below supersedes older failed
+clock-query hold observations only for its explicitly bounded v5 qualification.
+
 This is a session transition snapshot, not a second runtime ledger or a fixed
 master plan. Re-read source, actual process state and Orca before relying on it.
 `proposal.md`, `design.md`, `specs/` and `tasks.md` retain outcome/acceptance meaning;

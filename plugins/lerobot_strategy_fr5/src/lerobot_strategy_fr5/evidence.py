@@ -31,6 +31,8 @@ EVENT_KINDS = {
     "HYPOTHESIS",
     "RECOLLECTION_DECISION",
     "RUN_END",
+    "PROPOSAL_CANDIDATE",
+    "PROPOSAL_VALIDATION",
 }
 
 
@@ -168,3 +170,89 @@ class JsonlEvidenceSink:
 
     def __exit__(self, exc_type, exc, tb):
         self.close()
+
+
+def inspect_proposal_evidence(path: str | Path) -> dict[str, Any]:
+    """Verify a sidecar prefix and derive proposal diagnostics, without IO to FR5.
+
+    Digests detect accidental changes, not forgery. Missing RUN_END means only
+    that run completeness is unknown; an observed proposal result can survive it.
+    A truncated final JSON line is not accepted as a complete event.
+    """
+    from tools.data_factory.rollout.evidence_boundary import build_proposal_diagnostic
+    from tools.fr5_data_factory import ContractError, load_json_strict
+
+    candidates = {}
+    diagnostics = []
+    run_id = None
+    ended = False
+    started = False
+    count = 0
+    compatibility = None
+    with Path(path).open(encoding="utf-8") as handle:
+        for sequence, line in enumerate(handle):
+            try:
+                # The same strict JSON reader rejects duplicate keys/NaN.
+                record = load_json_strict(line)
+                digest = record.pop("event_digest")
+                expected_fields = {"schema_version", "run_id", "sequence", "kind",
+                                   "wall_time_ns", "monotonic_time_ns", "compatibility", "payload"}
+                if (not line.endswith("\n") or set(record) != expected_fields or ended
+                        or record["schema_version"] != EVIDENCE_SCHEMA_VERSION
+                        or type(record["sequence"]) is not int or record["sequence"] != sequence
+                        or record["kind"] not in EVENT_KINDS
+                        or not isinstance(record["payload"], dict)
+                        or not isinstance(record["run_id"], str) or not record["run_id"]
+                        or any(type(record[k]) is not int or record[k] < 0
+                               for k in ("wall_time_ns", "monotonic_time_ns"))
+                        or digest != "sha256:" + hashlib.sha256(_canonical_bytes(record)).hexdigest()):
+                    raise ValueError("event")
+                if run_id is None:
+                    run_id = record["run_id"]
+                    compatibility = record["compatibility"]
+                    if (not isinstance(compatibility, dict)
+                            or set(compatibility) != {"lerobot_version", "lerobot_api_family",
+                                                      "dataset_codebase_version", "evidence_schema_version"}
+                            or compatibility["lerobot_version"] not in SUPPORTED_LEROBOT_VERSIONS
+                            or compatibility["lerobot_api_family"] != "0.6"
+                            or compatibility["dataset_codebase_version"] not in SUPPORTED_DATASET_CODEBASE_VERSIONS
+                            or compatibility["evidence_schema_version"] != EVIDENCE_SCHEMA_VERSION):
+                        raise ValueError("compatibility")
+                if record["run_id"] != run_id or record["compatibility"] != compatibility:
+                    raise ValueError("run")
+                kind, payload = record["kind"], record["payload"]
+                if kind == "RUN_START":
+                    if sequence != 0:
+                        raise ValueError("start")
+                    started = True
+                elif kind == "RUN_END":
+                    if not started:
+                        raise ValueError("end")
+                    ended = True
+                elif kind == "PROPOSAL_CANDIDATE":
+                    candidates[digest] = payload
+                elif kind == "PROPOSAL_VALIDATION":
+                    candidate_digest = payload["candidate_event_digest"]
+                    candidate = candidates.pop(candidate_digest)
+                    diagnostic = build_proposal_diagnostic(candidate, payload)
+                    diagnostics.append({"run_id": run_id, "candidate_event_digest": candidate_digest,
+                                        "validation_event_digest": digest, "diagnostic": diagnostic})
+                count += 1
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ContractError(f"ROLLOUT_PROPOSAL_EVIDENCE_INVALID: line {sequence + 1}") from exc
+    return {"run_id": run_id, "events": count, "run_end_observed": ended,
+            "diagnostics": diagnostics, "unfinished_candidate_events": list(candidates),
+            "execution_authorized": False, "training_authorized": False}
+
+
+def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Read-only FR5 proposal-attempt diagnostics")
+    parser.add_argument("path", type=Path)
+    args = parser.parse_args()
+    print(json.dumps(inspect_proposal_evidence(args.path), ensure_ascii=False, allow_nan=False))
+
+
+if __name__ == "__main__":
+    main()

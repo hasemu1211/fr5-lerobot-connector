@@ -29,6 +29,86 @@ from tools.fr5_data_factory import (
 PACKET_SCHEMA = "data_factory.rollout_evidence_packet.v1"
 UNKNOWN = "UNKNOWN"
 
+
+def build_proposal_diagnostic(candidate: Mapping[str, Any], validation: Mapping[str, Any]) -> dict[str, Any]:
+    """Diagnose a preexecution candidate, never synthesize a terminal lifecycle.
+
+    The sidecar consumer validates event identity/order. This owner independently
+    replays the numerical validator and binds exact candidate/output payloads.
+    A numerical block is not a task failure or evidence of a data deficit.
+    """
+    import hashlib
+    import math
+    from .finite_plan import validate_proposal
+
+    code = "ROLLOUT_PROPOSAL_DIAGNOSTIC_BINDING"
+    try:
+        c, result = copy.deepcopy(dict(candidate)), dict(validation)
+        if (set(c) != {"schema_version", "chunk_sequence", "raw_chunk", "processed_chunk",
+                       "observation_evidence", "proposal_candidate", "projection"}
+                or c["schema_version"] != "data_factory.rollout_proposal_candidate.v1"
+                or type(c["chunk_sequence"]) is not int or c["chunk_sequence"] < 1
+                or set(result) != {"candidate_event_digest", "status", "code", "dispatch_scope", "dispatch"}
+                or result["dispatch_scope"] != "PROPOSAL_BUILDER_ONLY"
+                or result["dispatch"] != "NOT_ATTEMPTED"
+                or result["status"] not in {"VALID", "BLOCKED", "ERROR"}
+                or not isinstance(c["observation_evidence"], dict)
+                or not isinstance(c["projection"], dict)):
+            raise ContractError(code)
+        _digest(result["candidate_event_digest"], code)
+        for name in ("raw_chunk", "processed_chunk"):
+            tensor = c[name]
+            shape = tensor["shape"]
+            sizes = {"<f2": 2, "<f4": 4, "<f8": 8, ">f2": 2, ">f4": 4, ">f8": 8}
+            if (set(tensor) != {"dtype", "shape", "data_hex", "sha256"}
+                    or tensor["dtype"] not in sizes or not isinstance(shape, list)
+                    or len(shape) not in (2, 3) or shape[-1] != 7
+                    or len(shape) == 3 and shape[0] != 1
+                    or any(type(n) is not int or n < 1 for n in shape)
+                    or not 1 <= shape[-2] <= 50):
+                raise ContractError(code)
+            raw = bytes.fromhex(tensor["data_hex"])
+            if (len(raw) != math.prod(shape) * sizes[tensor["dtype"]]
+                    or hashlib.sha256(raw).hexdigest() != tensor["sha256"]):
+                raise ContractError(code)
+        proposal = c["proposal_candidate"]
+        if proposal["proposal_digest"] != canonical_digest({k: v for k, v in proposal.items() if k != "proposal_digest"}):
+            raise ContractError(code)
+        stamps = c["observation_evidence"]["source_timestamps_s"]
+        if (proposal["source_timestamps_s"] != {
+                "state": stamps["state"], "camera1": stamps["up"], "camera2": stamps["wrist"]}
+                or any(c[k]["shape"][-2] != len(proposal["actions"])
+                       for k in ("raw_chunk", "processed_chunk"))
+                or c["projection"]["projected_actions_digest"] != canonical_digest(proposal["actions"])):
+            raise ContractError(code)
+        try:
+            validate_proposal(proposal)
+        except ContractError as rejected:
+            expected = ("BLOCKED", str(rejected))
+        else:
+            expected = ("VALID", None)
+        if result["status"] == "ERROR":
+            if not isinstance(result["code"], str) or not result["code"]:
+                raise ContractError(code)
+        elif (result["status"], result["code"]) != expected:
+            raise ContractError(code)
+        value = {
+            "schema_version": "data_factory.rollout_proposal_diagnostic.v1",
+            "candidate_digest": canonical_digest(c),
+            "chunk_sequence": c["chunk_sequence"],
+            "checkpoint": proposal["checkpoint"],
+            "observation_digest": proposal["observation_digest"],
+            "proposal_candidate_digest": proposal["proposal_digest"],
+            "stage": "PROPOSAL_VALIDATION", "validation_status": result["status"],
+            "code": result["code"], "dispatch_scope": result["dispatch_scope"],
+            "dispatch": result["dispatch"], "task_outcome": "NOT_EVALUATED",
+            "data_deficit": UNKNOWN, "execution_authorized": False, "training_authorized": False,
+        }
+        value["diagnostic_digest"] = canonical_digest(value)
+        return value
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise ContractError(code) from exc
+
 _PACKET_FIELDS = frozenset({
     "schema_version", "identity", "data_quality_analysis",
     "rollout_evidence_analysis", "limitations", "packet_digest",

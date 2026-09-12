@@ -200,3 +200,38 @@ Then qualify the exact built driver at bounded HOME and the authorized learned
 execution path with fresh environment checks. CPU tests alone cannot establish
 the physical reaction bound or complete-task success. Original data/checkpoints
 and the user-owned vendor worktree stay unchanged.
+## LeRobot integration and pick-place continuation (2026-09-12)
+
+The current user-selected task is bidirectional pick-and-place, not a promotion
+of the older raw26 pickup probe. LeRobot 0.6.1 owns model inference, saved
+processors and its action queue. FR5 adapts their exact outputs into the existing
+sole executor and retains device-specific authority, cancellation and actual
+transport evidence. Do not implement another policy queue or per-row publisher
+to evade full-chunk admission. The current plugin deliberately cannot send;
+its CLI's presence is not an execution qualification.
+
+The existing proposal bridge now optionally records a candidate before numerical
+validation through the existing EvidenceSink. It preserves exact raw and already
+postprocessed chunk bytes without a second processor call, originating observation
+identity/timestamps, projected candidate and the original validator result. A
+distinct read-only proposal diagnostic replays that validator. It does not invent
+a plan, terminal trace or manipulation failure from a velocity rejection.
+`NOT_ATTEMPTED` is explicitly scoped to the proposal builder, not a claim about
+all commands in the containing run. A storage failure cannot turn rejection into
+approval; an unmatched candidate remains incomplete. Event hashes/order detect
+accidental changes, not authenticated provenance or power-loss durability.
+
+Read retained attempts with the existing plugin module entry point:
+
+```sh
+direnv exec . python3 -m lerobot_strategy_fr5.evidence /path/to/sidecar.jsonl
+```
+
+This is the bridge/diagnostic slice, not the full closed loop. The rollout CLI
+still needs the existing executor connection. Failure-conditioned pick-place
+recollection must preserve both original endpoints, direction and task binding;
+the existing pickup-only guard cannot simply be removed. Failed policy actions
+are diagnostic data, not automatically expert training targets. Model comparison
+uses the approved TRAIN-only normalization and fixed heldout cohort, separately
+from online execution qualification. Old data, processors and approval artifacts
+remain unchanged.
