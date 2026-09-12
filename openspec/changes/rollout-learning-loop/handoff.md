@@ -2,6 +2,61 @@
 
 ## September 12 continuation: LeRobot pick-place integration
 
+### Current boundary: native inference passed; canonical Scene slots rejected
+
+The user explicitly paused all physical execution until they say **복귀** on
+September 12, after the r10 probe. Do not restart robot bring-up, current-pose
+holds or physical rollout in the meantime. Root's r10 robot, camera and model
+processes have exited; the shared heavy lock was acquired read-only and released
+to confirm availability. Independent CPU/software and Portfolio work may continue.
+
+On main `7f6e0cc`, r10 loaded the unchanged rhythm40 12k checkpoint before
+starting the bounded runtime, retained all 50 native output rows, and compiled
+the canonical v4 source through `_infer_native_program`. Inference took
+0.160154 s; all eight original 300 ms freshness checks passed, with maximum
+observed input age 0.271183 s. The actual normal `OneJob.plan_only` consumer then
+returned `PLAN_REJECTED / LEARNED_SCENE_SCOPE`, with zero learned/gripper goals,
+no recorder calls, no dataset or Scene writes, and task outcome `NOT_EVALUATED`.
+Bring-up issued current-position hold/lifecycle calls; this is not a claim of
+zero hardware effects. Exact log:
+`.agent-local/work/lerobot-fr5/native-rhythm40-probe-20260912-r10.log`, SHA-256
+`20379f9859ebdd3604a3b6f42fc2c416cc07e89f5c087ea1c3d55c3fb36b6fd8`.
+
+Source diagnosis: `run_job._scene_binding` preserves `release_slot` and, for
+the current previously placed object, `source_slot`. The learned branch of
+`PickupExecutor._compile_plan` currently admits only the three basic Scene keys.
+Do not discard slot fields to pass this guard. A correction must retain source
+consumption/CAS, original destination and grant bindings while keeping finite
+learned completion distinct from qualified recycle/known placement. In particular,
+ordinary recycle-summary emission and the Scene revision used after source-slot
+consumption require review together. This is a software integration gap, not an
+offline model-quality gate. Existing Rollout owner received bounded CPU-only
+follow-up `msg_a5a75a83eb73`, superseded route binding `msg_6201a8aead66`;
+delivery alone does not prove acceptance or implementation. Root owns integration.
+
+The r9 apparent hardware-stale rejection was traced to the agent-local readiness
+observer taking its clock sample before `transport.snapshot()` spun incoming DDS
+callbacks. A newer callback could therefore appear later than the claimed capture
+time. Moving the local clock sample after the snapshot, as the product executor
+already does, passed a 10.004183 s hold on the same runtime: 3,907 samples and 976
+producer progressions under unchanged 100 ms/1 ms settings. No product code or
+threshold changed. Log SHA-256
+`3d088306178c0259afbc9db6abd7e17b315a9b38a20e35a6d08ae25d702938c6`
+at `native-rhythm40-readiness-after-snapshot-20260912-r9.log` in the same folder.
+R10 separately passed 10.000398 s readiness before inference.
+
+The earlier r8 camera error was USB device re-enumeration; the same configured
+RealSense auto-recovered and three subsequently observed UP frames had mean
+brightness about124.47. This is historical camera recovery evidence, not a
+current illumination certificate or permission to override the physical pause.
+The existing teardown fault remains separate and is not qualified by these probes.
+
+Learning's completed paired 15k/18k results are integrated from owner `8457eae`
+as `5349c90`; see `../learning-evaluation-loop/design.md`. The fixed-cohort late
+curve is near-flat/slightly regressed under the inherited cooled schedule, with
+a modest roughness gain. Original12k remains the reference, not a proven physical
+winner; no new training fork or physical gate was created.
+
 ### Original-transition recollection is now software-connected
 
 Owner commit `a62771a85f97015524be31d7b34d6779bf359420`, integrated as
