@@ -105,9 +105,24 @@ heldout episodes 35–39 and later sampled time fractions. These are descriptive
 findings, not evidence of a particular cause or a physical admission condition.
 Exact native execution, cohort, denominator, hashes and limits are recorded in
 `../learning-evaluation-loop/design.md`. Learning continues the authorized
-CPU/read-only source and nearest-TRAIN-condition investigation around 34→35;
-no further training or physical execution is launched. A separate immutable
-five-test/source review of `e125f58` is active (`msg_f4357f44fee3`), not yet a verdict.
+CPU/read-only source and nearest-TRAIN-condition investigation around 34→35
+completed as owner `8afc0bf`, integrated `1115b74`. Declared yaw+35.890855° is
+absent from TRAIN0–31 and occurs in heldout35–39; their middle/late configurations
+are also distant from all same-task TRAIN rows. Inspected provenance did not show
+a new large state/reference offset or target-outside-bracket discontinuity.
+This supports condition-coverage investigation, not yaw causality or corruption.
+Exact limits and next controlled coverage proposal are in the Learning design.
+Root also located an older same-direction pick-place candidate (proofloop episode2,
+yaw+32.014373°); Learning is checking its existing compatibility/admission lineage
+read-only before treating new physical collection as the only possible source.
+No heldout reassignment, admission, new training or physical execution is implied.
+
+Independent review of `e125f58` found a normal flow-report TRAIN/heldout label bug
+(`msg_f68b82b0df9e`), not a numerical loss change. Root correction `9396750` passes
+25 focused CPU tests in12.653s; independent immutable follow-up
+`msg_90c70f958031` reports NO FINDINGS with two tests in3.187s and the original
+falsifier closed. The review does not independently qualify the broader native
+experimental numbers or physical behavior. Public receipt is in Learning tasks.
 
 ### Original-transition recollection is now software-connected
 
