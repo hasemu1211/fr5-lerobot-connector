@@ -13,16 +13,24 @@ is `fr5.motion_program.v4`, but the learned wrapper allowed only v2.
 Correction `ab41b19` accepts canonical v2/v4 sources while preserving the complete
 source and destination bindings and invoking the unchanged source validator.
 Unknown versions and nested learned sources remain rejected. The focused
-finite-plan and data-factory suite passes 113 tests in 79.839 s, exit 0;
-independent immutable review is pending. No execution bound, motion owner,
+finite-plan and data-factory suite passes 113 tests in 79.839 s, exit 0.
+Independent immutable review of `ab41b193cc7872db4696a298b836257fc123a3cc`
+against `92bece74de157a40eaba69224d8e380ad0def091` reports no scoped findings:
+95 finite-plan tests pass in 106.656 s, plus 11 independent binding/mutation
+falsifiers. These are source/CPU checks, not a live replay or full discovery.
+The archive verifier had to preserve ROS environment paths and immutable Git
+fixture access; its earlier harness failures are not product regressions.
+No execution bound, motion owner,
 checkpoint, data, scene or approval changed. No learned/gripper goal was sent.
 The next physical-input check must use a new fresh observation and current
 runtime, not replay the saved r5 output as live authority. GPU is meanwhile
 assigned to Learning's approved 12k-to-18k continuation. Owner message
 `msg_5758ebcbf18b` reports the production wrapper running as PID 3416314 under
 supervisor 3416141, with original data/checkpoints preserved and capacity for
-the two planned saves plus its existing reserve. This establishes launch, not
-yet an optimizer update or completed checkpoint. Further training
+the two planned saves plus its existing reserve. Subsequent owner message
+`msg_95cfc7033972` confirms native optimizer updates through absolute step 12,248,
+about 5.3 updates/s, restored epoch 2/offset 3,400 and the original scheduler.
+No new saved checkpoint or improvement is claimed at that observation. Further training
 is not a prerequisite for rollout. Evidence and exact logs remain in the local
 probe report linked below.
 
