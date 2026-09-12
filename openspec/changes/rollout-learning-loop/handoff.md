@@ -2,7 +2,28 @@
 
 ## September 12 continuation: LeRobot pick-place integration
 
-Latest physical-input preparation used the existing native full-chunk path, not
+Latest r5 preparation supersedes the earlier freshness rejection below. Loading
+the unchanged model before starting the bounded device runtime produced 50 native
+actions with 0.158648 s inference. All original 300 ms source-age checks passed;
+the oldest input was 239.782 ms at post-inference admission. This single result
+does not establish sustained freshness or a thread-count performance gain.
+Compilation then exposed `LEARNED_SOURCE_PROGRAM`: the canonical A-to-B source
+is `fr5.motion_program.v4`, but the learned wrapper allowed only v2.
+
+Correction `ab41b19` accepts canonical v2/v4 sources while preserving the complete
+source and destination bindings and invoking the unchanged source validator.
+Unknown versions and nested learned sources remain rejected. The focused
+finite-plan and data-factory suite passes 113 tests in 79.839 s, exit 0;
+independent immutable review is pending. No execution bound, motion owner,
+checkpoint, data, scene or approval changed. No learned/gripper goal was sent.
+The next physical-input check must use a new fresh observation and current
+runtime, not replay the saved r5 output as live authority. GPU is meanwhile
+assigned to Learning's approved 12k-to-18k continuation; its agent accepted the
+handoff, but actual training launch has not yet been confirmed. Further training
+is not a prerequisite for rollout. Evidence and exact logs remain in the local
+probe report linked below.
+
+Earlier physical-input preparation used the existing native full-chunk path, not
 the separate CLI plugin. With the original 12k checkpoint and current A-to-B
 instruction, fresh cameras and seven-joint state produced all 50 actions.
 The explicitly selected existing integer-percent gripper conversion passed its
@@ -11,7 +32,7 @@ measured inference was 0.158651 s. No learned or gripper goal was sent. Two boun
 v5 current-position holds passed about ten seconds each. This is not learned
 task success or qualified teardown: MoveIt reported a shutdown-time fault.
 
-The next diagnostic must separate capture, transfer, inference and final
+That diagnostic needed to separate capture, transfer, inference and final
 admission age while retaining one loaded model. Four capture-only observations
 arrived with oldest camera ages about 56–104 ms; they do not pinpoint the age
 overrun in the model attempt. A first local probe omitted the existing gripper
@@ -91,7 +112,8 @@ main's focused continuation/checkpoint suite passes 24 tests; independent immuta
 review of owner `9da584c` passes 18 continuation tests with no scoped findings.
 It preserves native optimizer, scheduler, committed sample cursor and relevant
 CPU RNG history for the admitted deterministic loader, not arbitrary worker RNG
-or stochastic transforms. No further production GPU training has been launched.
+or stochastic transforms. The new continuation handoff is described above;
+source verification alone does not prove that the GPU job started.
 Continuation verification is independent of physical rollout admission.
 
 Preexisting user plugin edits were retained; a recoverable source copy is under
