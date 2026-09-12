@@ -1,9 +1,25 @@
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.substitutions import FindPackageShare
 from moveit_configs_utils import MoveItConfigsBuilder
 from moveit_configs_utils.launches import generate_demo_launch
+
+
+def _launch_setup(context):
+    moveit_config = MoveItConfigsBuilder(
+        "fairino5_v6_robot", package_name="fairino5_v6_moveit2_config"
+    ).robot_description(
+        mappings={
+            "use_fake_hardware": LaunchConfiguration(
+                "use_fake_hardware"
+            ).perform(context),
+            "robot_model_file": LaunchConfiguration(
+                "robot_model_file"
+            ).perform(context),
+        }
+    ).to_moveit_configs()
+    return list(generate_demo_launch(moveit_config).entities)
 
 
 def generate_launch_description():
@@ -17,17 +33,8 @@ def generate_launch_description():
         ]),
         description="URDF model selection only; does not grant motion qualification.",
     )
-    moveit_config = MoveItConfigsBuilder(
-        "fairino5_v6_robot", package_name="fairino5_v6_moveit2_config"
-    ).robot_description(
-        mappings={
-            "use_fake_hardware": LaunchConfiguration("use_fake_hardware"),
-            "robot_model_file": LaunchConfiguration("robot_model_file"),
-        }
-    ).to_moveit_configs()
-    ld = LaunchDescription()
-    ld.add_action(declare_use_fake_hardware)
-    ld.add_action(declare_robot_model)
-    for action in generate_demo_launch(moveit_config).entities:
-        ld.add_action(action)
-    return ld
+    return LaunchDescription([
+        declare_use_fake_hardware,
+        declare_robot_model,
+        OpaqueFunction(function=_launch_setup),
+    ])
