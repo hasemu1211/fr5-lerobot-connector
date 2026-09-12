@@ -179,6 +179,28 @@ The predeclared evidence for consistent benefit from more optimization is not me
 
 The most diagnostic next single training comparison is a declared schedule-tail fork from the latest saved non-floor point009000, holding its actual saved LR9.456213946819498e-6 through absolute18000 with the existing `--continuation-schedule hold`, same batch/data/augmentation/processors and3000-step eval/save cadence. Its9000-step prefix and native optimizer/RNG history stay intact; only the future LR schedule differs from the retained cooled branch at matched12/15/18k exposure. This is not a claim of continuing the18k state at a retroactively raised LR. The9k scheduler/RNG/optimizer files exist and saved last_epoch/LR were inspected; this new fork has not been admitted or launched in this allocation. Compare the same cohort against the retained cooled branch, with per-direction/seed/observation consistency and tails. If the held-LR branch improves those errors consistently, early cooling gains support; if it cannot, repeating more floor-LR updates is a weaker next use of compute than a matched TRAIN-versus-heldout residual/coverage diagnosis. Neither outcome establishes global optimality. At measured~0.175s/update,9000 updates plus startup,3 eval/save events and3 separate paired reloads suggests about40min total; reserve45min and three complete snapshots (~3.69GiB) plus existing1GiB reserve and small evidence/cache writes. Root owns the next resource decision; no automatic extension or new rollout gate is created.
 
+### User-authorized root execution of the LR-tail comparison (2026-09-12)
+
+After the condition-support diagnosis and old-data reuse review, the user explicitly
+requested root to execute the proposed overnight comparison directly. Missing
+condition support does not rule out an optimization benefit. The single admitted
+experiment branches from the original009000 full state and holds its saved
+LR9.456213946819498e-6 to18000 via the existing native continuation path; it does
+not restart from18k or reset the optimizer. Batch4, frozen VLM/action-expert
+training selection, disabled transforms, original TRAIN/EVAL partitions and
+saved TRAIN normalization stay unchanged. Compare new12/15/18k against retained
+cooled references on the same observation/noise cohort, preserving per-direction,
+per-observation and gripper/J6 tradeoffs. No automatic promotion or physical gate
+is introduced. Root owns the training/evaluation resource allocation; no duplicate
+Learning worker run is requested. Reserve three complete checkpoints plus the
+existing1GiB disk reserve, supervise existing memory/PSI/nonfinite/OOM conditions,
+bound training to45minutes, and use the retained15-minute-per-checkpoint evaluation
+supervisor. The roughly45-minute whole comparison is an estimate, not a measured
+completion time. Partial failures are retained, never automatically retried.
+Original data/parents stay immutable. Physical work remains prohibited until
+the user's **복귀**. Local root supervisor and receipts:
+`.agent-local/work/lerobot-fr5/hold9k-20260912.py` and `hold9k-20260912/`.
+
 ## Subsequent 12k TRAIN-versus-heldout diagnosis
 
 User/root message `msg_d319051f4bf3` explicitly allocated this independent offline diagnosis while physical activity was stopped. No further training or robot/ROS/camera operation was performed. The unchanged12k checkpoint above was loaded once with its saved processors and TRAIN-only normalization. Before inference, TRAIN episodes2,3,10,11,18,19,26,27 were fixed as the middle pair in each consecutive eight-episode TRAIN block: four episodes per instruction spread across the32-episode partition. Each contributes q=.1/.5/.9, giving24 TRAIN observations. The original24 heldout observations from32–39 and all3 noise seeds remain unchanged. Time fractions are not annotated semantic phases. Observations differ between partitions; the native flow draw rule is identical, but `100000*seed+dataset_index` produces different draws on their different dataset indices.
