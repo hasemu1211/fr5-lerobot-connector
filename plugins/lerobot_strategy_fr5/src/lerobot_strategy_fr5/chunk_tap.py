@@ -21,7 +21,7 @@ class CapturedPolicyChunk:
 
 
 class ExactSmolVLAChunkTap:
-    """Read-only tap on the exact chunk consumed by LeRobot 0.6.1 Sync."""
+    """Retain the full prediction; LeRobot 0.6.1 Sync owns row consumption."""
 
     def __init__(
         self,
@@ -73,7 +73,9 @@ class ExactSmolVLAChunkTap:
                     f"FR5_CHUNK_SHAPE: {getattr(raw, 'shape', None)}"
                 )
 
-            expected = int(self.policy.config.n_action_steps)
+            # Native select_action queues only n_action_steps from this full
+            # prediction. Observation must not require those horizons to match.
+            expected = int(self.policy.config.chunk_size)
             if raw.shape[1] != expected:
                 raise RuntimeError(
                     f"FR5_CHUNK_LENGTH: {raw.shape[1]} != {expected}"
