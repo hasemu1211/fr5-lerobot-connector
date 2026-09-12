@@ -2,6 +2,48 @@
 
 ## September 12 continuation: LeRobot pick-place integration
 
+### Latest resource result: continuation stopped; original 12k remains usable
+
+The approved 12k-to-18k run below is no longer running. Its owner resource
+receipt reports exit -15, `PERSISTENT_HOST_PRESSURE`, and unchanged parent and
+approved inventory. Native updates reached 15,000 (2.69 reported data passes);
+the log records heldout loss 0.6508 at 21:01:03 KST, followed by checkpoint save.
+The `015000` directory contains only `pretrained_model/config.json` (2,794 bytes):
+no model weights or continuation state. This is an incomplete save, not a usable
+15k checkpoint, a paired evaluation result, or a model promotion. Preserve it
+as failure evidence and retain the original 12k for rollout preparation.
+
+Read-only attribution narrows, but does not yet identify, the memory cause.
+At elapsed 825 s the trainer finished updates and entered evaluation; available
+host memory fell from 2.71 GB at 821 s to 0.68 GB at 836 s, before the checkpoint
+log at approximately 837 s. Therefore serialization alone does not explain the
+initial drop. Installed LeRobot constructs separate TRAIN and EVAL loaders with
+the same four persistent workers; its first evaluation starts the EVAL iterator.
+Saving then calls safetensors, which retains CPU copies of non-CPU tensors until
+serialization finishes. The original model's header describes 906,639,456 bytes
+of tensors. These are distinct candidate contributions, not measured per-process
+attribution. Optimizer saving follows model saving and was not reached in the
+normal path. Do not blame data corruption, change the optimizer, or repeat the
+same expensive run on the basis of this host-wide trace.
+
+The Learning owner should first distinguish evaluation-worker/decoder residency
+from model-save allocation, preserving native RNG, sample cursor and save/reload
+semantics. Root did not patch that owner's code or start competing GPU work.
+At inspection the two recorded training PIDs were absent and no CUDA compute
+process was listed. Orca messaging independently returned `runtime_timeout`;
+the follow-up was not confirmed delivered. Do not treat a message timeout as a
+worker exit or launch duplicate work. Original-transition recollection work is
+already assigned in its isolated worktree and was observed executing focused CPU
+tests; it does not depend on another training run or a new physical outcome.
+
+Exact local evidence is retained under the Policy Learning owner's
+`.agent-local/work/learning-evaluation-loop/`: `rhythm40-live-start-r1.json`,
+`rhythm40-live-training-r1.log`, `rhythm40-live-resources-r1.jsonl` and
+`rhythm40-live-result-r1.json`. No learned motion or task success is added by this
+resource diagnosis. The next rollout step remains fresh native input through
+normal OneJob plan-only, then the existing live authority path when its actual
+conditions are met; longer training is not an entry gate.
+
 Latest r5 preparation supersedes the earlier freshness rejection below. Loading
 the unchanged model before starting the bounded device runtime produced 50 native
 actions with 0.158648 s inference. All original 300 ms source-age checks passed;
