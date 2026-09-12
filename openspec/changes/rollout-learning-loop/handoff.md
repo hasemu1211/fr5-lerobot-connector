@@ -113,9 +113,25 @@ a new large state/reference offset or target-outside-bracket discontinuity.
 This supports condition-coverage investigation, not yaw causality or corruption.
 Exact limits and next controlled coverage proposal are in the Learning design.
 Root also located an older same-direction pick-place candidate (proofloop episode2,
-yaw+32.014373°); Learning is checking its existing compatibility/admission lineage
-read-only before treating new physical collection as the only possible source.
-No heldout reassignment, admission, new training or physical execution is implied.
+yaw+32.014373°). Learning completed the bounded read-only eligibility audit in
+`msg_f36df7dfe300`: feature/camera/gripper/frame contracts match and four late
+A-to-B observations have closer state support, but early observations do not;
+there is no B-to-A support. The old .03 motion recipe takes54.17s versus25.03s
+for the compared rhythm40 episode, so mixing it also changes temporal progress
+within the same50-row horizon. Historical semantic/technical PASS was located;
+current training inventory/approval for this separate episode was not located
+by the bounded search, not proved absent everywhere. Root retains it as a
+future mixed-recipe candidate rather than spending the current critical path on
+admission/conversion of one slow episode. First controlled coverage comparison
+should use the current recipe, independently varied XY and both directions,
+retaining the original heldout and a matched-update existing-data control.
+This is an experiment priority, not a prohibition on older data or a new rollout
+gate. No heldout reassignment, admission, new training or physical execution
+occurred. Learning's assigned CPU diagnosis/reuse review is complete; no further
+GPU run or broad research assignment is pending. Real execution stays paused
+until the user's **복귀**. Resume the existing native physical path before adding
+unrelated analysis systems; learned Pick/reset and actual recollection effect
+remain unproved.
 
 Independent review of `e125f58` found a normal flow-report TRAIN/heldout label bug
 (`msg_f68b82b0df9e`), not a numerical loss change. Root correction `9396750` passes
