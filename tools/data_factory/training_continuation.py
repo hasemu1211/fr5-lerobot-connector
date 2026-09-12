@@ -28,8 +28,10 @@ def native_continuation(trainer, *, checkpoint: Path, state: dict, schedule: dic
     eval_started = state.get("persistent_eval_started", False)
     eval_frequency = 0
     eval_present = False
+    worker_loaders = 0
     original_build = trainer.make_optimizer_and_scheduler
     original_prepare = Accelerator.prepare
+    original_worker_kwargs = trainer._dataloader_worker_kwargs if persistent else None
     original_load = trainer.load_training_state
     original_cycle = trainer.cycle
     original_update = trainer.update_policy
@@ -65,8 +67,9 @@ def native_continuation(trainer, *, checkpoint: Path, state: dict, schedule: dic
                 raise ContractError("TRAINING_CONTINUATION_LOADER")
             eval_present = len(loaders) == 2
             for index, loader in enumerate(loaders):
+                keep_workers = index == 0 or not eval_started
                 if (loader.num_workers != 4 or loader.prefetch_factor != 4
-                        or not loader.persistent_workers
+                        or loader.persistent_workers != keep_workers
                         or loader.multiprocessing_context.get_start_method() != "spawn"):
                     raise ContractError("TRAINING_CONTINUATION_LOADER")
                 if index == 0 or eval_started:
@@ -76,6 +79,20 @@ def native_continuation(trainer, *, checkpoint: Path, state: dict, schedule: dic
                     # sample order belongs to the native (seed, epoch) sampler.
                     loader.generator = torch.Generator().set_state(torch.get_rng_state())
         return original_prepare(accelerator, *args, **kwargs)
+
+    def worker_kwargs(cfg):
+        nonlocal worker_loaders
+        worker_loaders += 1
+        options = original_worker_kwargs(cfg)
+        # Native creates TRAIN then EVAL. Already-started EVAL uses isolated
+        # worker seeds above, so ending that pool after evaluation preserves
+        # policy RNG while releasing host RAM before checkpoint serialization.
+        # TRAIN stays persistent; first-ever EVAL retains its native lifetime.
+        if worker_loaders == 2 and eval_started:
+            options["persistent_workers"] = False
+            import logging
+            logging.info("Continuation releases recreated EVAL workers after each evaluation; TRAIN remains persistent")
+        return options
 
     def load(path, optimizer, scheduler, **kwargs):
         nonlocal restored_rng
@@ -157,6 +174,7 @@ def native_continuation(trainer, *, checkpoint: Path, state: dict, schedule: dic
     with ExitStack() as stack:
         if persistent:
             stack.enter_context(patch.object(Accelerator, "prepare", prepare))
+            stack.enter_context(patch.object(trainer, "_dataloader_worker_kwargs", worker_kwargs))
         for name, value in (("compute_sampler_state", sample_state), ("make_optimizer_and_scheduler", build),
                             ("load_training_state", load), ("cycle", cycle), ("update_policy", update),
                             ("save_checkpoint", save)):

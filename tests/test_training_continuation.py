@@ -152,10 +152,20 @@ class NativeContinuationTest(unittest.TestCase):
         cfg.steps, cfg.batch_size, cfg.save_freq, cfg.resume = end, 4, end, True
         cfg.eval_steps = eval_steps
         self.trace.clear()
+        native_save = self.trainer.save_checkpoint
+
+        def check_worker_lifetime(**kwargs):
+            if state.get("persistent_eval_started"):
+                # Four TRAIN workers may remain, but completed EVAL must not
+                # retain another pool during native checkpoint serialization.
+                self.assertEqual(len(multiprocessing.active_children()), 4)
+            return native_save(**kwargs)
+
         with patch("sys.argv", ["tiny", f"--config_path={parent / 'train_config.json'}"]):
-            with native_continuation(self.trainer, checkpoint=parent.parent, state=state,
-                                     schedule=schedule, batch_size=4):
-                self.trainer.train(cfg)
+            with patch.object(self.trainer, "save_checkpoint", check_worker_lifetime):
+                with native_continuation(self.trainer, checkpoint=parent.parent, state=state,
+                                         schedule=schedule, batch_size=4):
+                    self.trainer.train(cfg)
         child = cfg.output_dir / f"checkpoints/{end:06d}/pretrained_model"
         child_state = json.loads((child.parent / "training_state" / CONTINUATION_STATE).read_text())
         return child, child_state, copy.deepcopy(self.trace)
