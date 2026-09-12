@@ -23,6 +23,7 @@
 - [x] Extend deterministic native continuation to the rhythm40 workers4/prefetch4/persistent/spawn recipe; qualify policy RNG, TRAIN/EVAL iterator history, uneven epochs, repeated resumes and immutable parent binding with focused CPU fixtures. Actual-policy execution uses root's explicit resource allocation.
 - [x] Qualify the admitted real-policy continuation, saved checkpoint and independent reload under the supported runtime scope before treating the longer curve as native policy evidence; Learning completed the explicitly handed-off rhythm40 interval and paired reloads under root's allocation.
 - [x] Make a resource-based longer development curve executable with a declared schedule intervention, checkpoint cadence, evaluation comparability and stop/extension criteria; retain historical comparisons and distinguish numerical solver evidence from learning quality.
+- [x] Complete the user-authorized final9k held-LR fork through18k and matched12/15/18k comparison. Retain the modest J6 improvement/gripper tradeoff, immutable original data and native saved-state evidence; close further learning exploration in favor of physical rollout→diagnosis→recollection after user return. See design's completed LR-tail evidence; no physical success or universal model promotion is claimed.
 
 - [x] Qualify larger-batch native throughput from an immutable learned checkpoint using an explicitly labelled warm-start fork; retain reset semantics and parent/child reload lineage without claiming exact continuation or superior learning from extra exposure.
 

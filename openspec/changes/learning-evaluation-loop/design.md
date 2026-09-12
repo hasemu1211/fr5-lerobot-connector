@@ -210,6 +210,79 @@ This is a resource/priority decision, not proof that learning cannot improve,
 and offline metric improvement is not a new precondition for the existing
 bounded physical rollout path.
 
+### Completed LR-tail evidence and stopping decision (2026-09-13)
+
+Root completed this exact branch from source8f23ba2 in1935.471s, exit0, with no
+resource/numerical stop and unchanged parent/inventory hashes. All three native
+snapshots retained LR9.456213946819498e-6 and155 AdamW step scalars at their exact
+12/15/18k counters. Committed sample counts are47998/59998/71997, corresponding
+to2.152/2.691/3.229 passes over22299 TRAIN anchors; counts reflect short epoch-tail
+batches, not step×batch estimates. Saved processors retain the original values;
+only singleton normalization-count serialization becomes scalar. Frozen-VLM
+selection, batch4 and disabled transforms remain unchanged. This is continuation
+from9k, not a new random initialization or an18k LR reset.
+
+Independent native reloads exited0 in185.012/180.013/180.016s. The existing public
+evaluator and retained local comparison callback produced72 chunks and72 paired
+native flow draws per checkpoint on the unchanged24 development observations.
+All1029 comparison checks passed across four retained and three new reports:
+data/split/approval, exact images/state/targets/masks, solver/noise and flow draws.
+Existing baseline metrics recompute identically. Native library source hashes and
+versions match; the only recorded project source differences are the previously
+reviewed checkpoint validator and TRAIN diagnostic helpers/report labels, which
+do not change this heldout numerical path. Evaluation input/source hashes remain
+unchanged after all reloads. No full discovery or new product-code change was
+needed for this experiment.
+
+| Held9k branch checkpoint | Paired flow mean | J6 RMSE (degrees) | Gripper RMSE (mm) | J6 internal velocity RMS (rad/s) |
+| --- | --- | --- | --- | --- |
+| 12000 | 0.226781 | 17.932 | 0.5071 | 0.538284 |
+| 15000 | 0.230258 | 18.142 | 0.4748 | 0.551020 |
+| 18000 | 0.225343 | 17.358 | 0.6322 | 0.528041 |
+
+Compared with the original12k reference, held18k reduces J6 RMSE5.25% and flow
+mean0.72%, but increases gripper RMSE17.05%. J6 improves in both instructions and
+all three inference seeds; flow does not, with red→blue and two seeds worse.
+Gripper p95 absolute error improves0.743→0.666mm while its maximum rises
+8.360→8.944mm, so a better typical tail cutoff does not erase rare large residuals.
+Held12k has small pooled improvements in both J6 and gripper; held15k has the best
+pooled gripper metric among these cuts. Neither is uniformly superior on every
+instruction/seed/metric. At matched18k exposure, held versus cooled J6 improves
+on19/24 seed-pooled observations, gripper on11/24. These correlated observations
+and three inference seeds are not independent training replicates or statistical
+significance evidence. Internal trainer eval_loss0.6063/0.6042/0.3817 uses a
+different bounded sampling/RNG path and must not be substituted for this paired
+comparison or physical task success.
+
+**Decision:** this finds a modest optimization effect, not a decisive learning
+solution or proof that learning is impossible. Preserve all candidates and the
+original reference; no automatic deployment/promotion or new rollout quality
+gate follows. Per the user's latest priority, stop additional training/metric
+search, retain the physical pause until **복귀**, and resume at the existing
+bounded rollout→diagnosis→targeted-recollection path. The missing-condition
+hypothesis remains relevant; this experiment did not change data coverage.
+
+Five-second training samples had minimum host availability2.545GiB, disk3.780GiB
+and maximum full-memory PSI avg10 of4.19; no supervisor stop was triggered. All
+training/evaluation children exited, GPU compute was empty and the shared heavy
+lock was released. The separate user-owned Portfolio visual task is not paused
+by this Learning closure.
+
+Evidence remains under `.agent-local/work/lerobot-fr5/hold9k-20260912/`:
+`start.json`, `result.json`, `training.log`, resource traces,
+`saved-state-12000.json`, `saved-state-15000-18000.json`, and
+`comparison/{plan,012000,015000,018000,immutability}.json`.
+`analysis.json` SHA256 is `af33e77b98bb0fa0562b067740c9b196e9ef735decd61418fbe260067c0de1eb`;
+it includes all report identities and source deltas. New training receipt digest
+is `a23934b3eb46dc587193df46178c20d03026628ce1b1905c0ef9b5a59168d85e`.
+Saved model SHA256 values at12/15/18k are respectively
+`a2969640e3573aa017121ddefe82a7bca5811fd05f5c2ea070ebcf0dc670006a`,
+`18237ea818e0320f1b4f8f851cc503fd4170c1cb906fb846ed16275a362de65d`,
+`b1046cb4b7ec69e78f372d57992bdf6da740cf9185bcdd67bc7294a5abc23651`.
+Root-local `check_state.py` and `analyze.py` reuse existing native evidence and
+metric functions; they are not product CLI additions. All model/data/runtime
+artifacts remain ignored and originals are preserved.
+
 ## Subsequent 12k TRAIN-versus-heldout diagnosis
 
 User/root message `msg_d319051f4bf3` explicitly allocated this independent offline diagnosis while physical activity was stopped. No further training or robot/ROS/camera operation was performed. The unchanged12k checkpoint above was loaded once with its saved processors and TRAIN-only normalization. Before inference, TRAIN episodes2,3,10,11,18,19,26,27 were fixed as the middle pair in each consecutive eight-episode TRAIN block: four episodes per instruction spread across the32-episode partition. Each contributes q=.1/.5/.9, giving24 TRAIN observations. The original24 heldout observations from32–39 and all3 noise seeds remain unchanged. Time fractions are not annotated semantic phases. Observations differ between partitions; the native flow draw rule is identical, but `100000*seed+dataset_index` produces different draws on their different dataset indices.
