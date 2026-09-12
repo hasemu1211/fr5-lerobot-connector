@@ -358,6 +358,20 @@ Unmeasured memory, task success and physical qualification SHALL NOT be inferred
 from solver work or internal vector changes. Candidate outputs SHALL NOT become
 executable proposals or new execution authority through this experiment.
 
+Offline loss, demonstration-relative action errors, roughness and aggregate
+proposal-rejection rates SHALL remain advisory analysis, not additional motion
+admission gates. Further training or improvement of those scores SHALL NOT be a
+prerequisite for an otherwise authorized bounded rollout. The existing executor
+SHALL still validate the actual proposed commands, selected limits, collision
+geometry, current state and scoped authority; an offline cohort statistic SHALL
+neither replace nor preempt those per-attempt checks.
+
+#### Scenario: An imperfect checkpoint has an admissible current proposal
+
+- **WHEN** a checkpoint has unfavorable offline errors but its current proposal satisfies the selected execution contract and existing authority
+- **THEN** aggregate error, rejection fraction or unfinished additional training SHALL NOT introduce another rollout block
+- **AND** actual execution and task outcome SHALL be recorded separately from offline prediction quality
+
 #### Scenario: A shorter update uses a remaining-interval midpoint
 
 - **WHEN** the partial AdaVLA candidate integrates `v=t` from zero at `t=1`

@@ -235,3 +235,18 @@ are diagnostic data, not automatically expert training targets. Model comparison
 uses the approved TRAIN-only normalization and fixed heldout cohort, separately
 from online execution qualification. Old data, processors and approval artifacts
 remain unchanged.
+
+Offline J6 deviation, gripper error and rejection fractions diagnose hypotheses;
+they do not qualify or disqualify a whole checkpoint for physical evaluation.
+Additional learning continues independently rather than becoming an execution
+dependency. The next current proposal is checked by the existing execution owner.
+The `.03` plugin default, `.1` proposal scaling ceiling and five-second finite
+budget are selected software contracts, not demonstrated manufacturer limits.
+Revising a consumption contract requires explicit semantics and focused evidence,
+not an offline-score threshold or silently bypassing the current validator.
+
+For evaluation, the [official SmolVLA results](https://huggingface.co/blog/smolvla)
+compare task success, completion time and completed tasks within a fixed time
+window. Those are useful complementary outcome measurements, not FR5 admission
+thresholds. Until real FR5 outcomes exist, the relationship between offline
+action error and task success remains unmeasured here.
