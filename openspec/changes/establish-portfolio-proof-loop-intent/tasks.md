@@ -2,6 +2,8 @@
 
 고정된 실행 순서가 아니다. 다음 소비자를 가장 빨리 열거나 중요한 불확실성을 줄이는 결과를 선택한다. 상세 실행과 handoff의 현재 owner는 Orca Run `run_45e15721f588`이며, 이전 통합 evidence는 `run_32171e63e7e8`에서 참조한다.
 
+- [x] 2026-09-12 공개 전달 체크포인트: Portfolio `b999087`/`d32ea35`를 main `8b6d55e`/`5cd3af5`로 통합했다. main export와 실제 화면 검사를 거친 owner export는 동일한 42,196,262바이트, SHA-256 `2a56bc1a66d400e9e10fa41526219faa2a52a27286f5f0858ffe52d7bca52e5b`이다. JS 구문·diff·strict OpenSpec 검사 통과 후 기존 `portfolio-2026-09-08` 릴리스의 `FR5-Portfolio.html`을 갱신하고, 인증 없는 공개 다운로드에서도 같은 SHA를 확인했다. 이전 39,939,996바이트 공개본(SHA `4703c6a2e697e5515c9a123dba0a9e6ac1313b9ce200f84a0f5b7f9537197149`)은 `.agent-local/portfolio/prepublish-20260912-73JOB4/FR5-Portfolio.html`에 복구 가능하게 보존했다. 릴리스 태그는 이동하지 않았으며, 이 공개본은 실제 learned Pick이나 재수집 효과를 주장하지 않는다.
+
 - [x] 검증된 수집 기준선: combined source의 전체 회귀와 focused 계약을 확인하고 remote main에 안전하게 통합한다. 사용자 dirty checkout과 원본 데이터는 보존한다. MEX는 통합 source에서 파생해 확인한다. 다음 소비자는 수집 UI 운영자다. 초기 통합 cutoff `dea09d8bd1d01768daa5ec3abdac77e0bbfb229f`의 검증·보존 근거는 Orca Task `task_af19eb5f36cb`와 Run handoff에서 확인한다. 이후 발견한 운용 결함은 새 cutoff에서 다시 검증한다.
 - [ ] 추가 UI 수집 재개: 검증한 코드로 main의 Orca에 UI를 열고 dataset 이름과 기존 적격 범위의 실험 프리셋을 전달한다. 새 startup/중단의 software evidence와 실제 runtime 관찰을 구분한다. 수집 시작과 개별 물리 실행 gate는 운영자가 확인한다.
 - [ ] 전체 아키텍처 비판 검토와 가치 있는 교정: Collection부터 Public Documentation까지 모든 lane의 실제 실행·소비 경로와 SSOT, 책임·의존성 경계, 루트부터 하위 구조, 테스트·스크립트 및 증거·산출물 경로를 검토한다. 기존 리서치·source/tests·최신 primary evidence와 실제 PC/runtime을 비례적으로 삼각 검증한다. 유지할 경계와 교정할 단절·중복을 구분하고, 선택한 개선을 구현·검증해야 완료다. Collection 전용 기능의 `collection/` 응집과 실제 VLA 실행·rollout 녹화에 재사용하는 공용 실행·기록 모듈의 분리를 포함하며, 해당 공유 requirement의 소비자·호환성·실패 경로를 검증한다. 활성 수집을 방해하지 않는 단계적 이전은 허용하지만 작은 추출이나 보기 좋은 구조·검토 보고서만으로 전체 완료하지 않는다.

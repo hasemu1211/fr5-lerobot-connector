@@ -96,6 +96,19 @@ hypotheses; it neither proves their cause nor adds a rollout gate. The longer
 9k-hold training fork is not started. Learning owns its diagnostic implementation,
 results and OpenSpec experiment record; no duplicate evaluator or owner is created.
 
+That bounded diagnosis is now complete and integrated as `1be433a` / `e125f58`.
+Fresh main `direnv exec . python3 -m unittest tests.test_offline_evaluation`
+passes 24 tests in 12.824 s; strict OpenSpec validation and diff checks pass.
+The same 12k checkpoint has sampled J6 RMSE 2.661 degrees on the selected TRAIN
+observations versus 18.321 degrees on heldout, with large errors concentrated in
+heldout episodes 35–39 and later sampled time fractions. These are descriptive
+findings, not evidence of a particular cause or a physical admission condition.
+Exact native execution, cohort, denominator, hashes and limits are recorded in
+`../learning-evaluation-loop/design.md`. Learning continues the authorized
+CPU/read-only source and nearest-TRAIN-condition investigation around 34→35;
+no further training or physical execution is launched. A separate immutable
+five-test/source review of `e125f58` is active (`msg_f4357f44fee3`), not yet a verdict.
+
 ### Original-transition recollection is now software-connected
 
 Owner commit `a62771a85f97015524be31d7b34d6779bf359420`, integrated as
