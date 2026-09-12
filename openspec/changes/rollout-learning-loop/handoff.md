@@ -2,7 +2,7 @@
 
 ## September 12 continuation: LeRobot pick-place integration
 
-### Current boundary: native inference passed; canonical Scene slots rejected
+### Current boundary: Scene-slot correction CPU-reviewed; physical replay paused
 
 The user explicitly paused all physical execution until they say **복귀** on
 September 12, after the r10 probe. Do not restart robot bring-up, current-pose
@@ -23,8 +23,8 @@ zero hardware effects. Exact log:
 `20379f9859ebdd3604a3b6f42fc2c416cc07e89f5c087ea1c3d55c3fb36b6fd8`.
 
 Source diagnosis: `run_job._scene_binding` preserves `release_slot` and, for
-the current previously placed object, `source_slot`. The learned branch of
-`PickupExecutor._compile_plan` currently admits only the three basic Scene keys.
+the current previously placed object, `source_slot`. At the r10 cutoff, the learned
+branch of `PickupExecutor._compile_plan` admitted only the three basic Scene keys.
 Do not discard slot fields to pass this guard. A correction must retain source
 consumption/CAS, original destination and grant bindings while keeping finite
 learned completion distinct from qualified recycle/known placement. In particular,
@@ -48,8 +48,18 @@ New fixtures use a temporary real SceneStateStore release/consume lifecycle and
 synthetic transport, covering immutable slotted plan-only, completion/fault,
 stale/foreign/repeated source claims, and malformed/foreign-robot release slots.
 An initial fixture called the diagnostic before the final OneJob poll; correcting
-that test ordering required no diagnostic product change. Independent review and
-fresh physical replay remain unverified; the user's physical pause still applies.
+that test ordering required no diagnostic product change.
+
+Correction `240d47266d59a91648576b9e1799da7e19ddbc1a` is pushed to main.
+Independent immutable CPU review against `b073ad4` reported **NO FINDINGS** in
+Orca `msg_f7d8fa084e66`: four focused tests PASS in 0.350 s, plus four independent
+falsifiers PASS. These cover grant rejection after slot mutation, unchanged
+ordinary recycle summary, zero goals after a post-CAS arming failure, and refusal
+to overwrite a foreign Scene revision at learned completion. Source consumption
+after approval remains a durable one-shot CAS even if arming then fails; it is
+not proof of physical consumption. The reviewer did not reuse root's 108-test
+result or run full discovery. This closes the scoped source/CPU review, not fresh
+model or physical qualification. The user's physical pause still applies.
 
 The r9 apparent hardware-stale rejection was traced to the agent-local readiness
 observer taking its clock sample before `transport.snapshot()` spun incoming DDS
@@ -73,6 +83,18 @@ as `5349c90`; see `../learning-evaluation-loop/design.md`. The fixed-cohort late
 curve is near-flat/slightly regressed under the inherited cooled schedule, with
 a modest roughness gain. Original12k remains the reference, not a proven physical
 winner; no new training fork or physical gate was created.
+
+During the physical pause, the user requested independent Learning progress.
+Root accepted the existing owner's proposal (`msg_3a67398d2b94`) in
+`msg_d319051f4bf3`; the same owner's turn start was confirmed. The next bounded
+experiment compares balanced TRAIN and heldout observations using the same 12k
+checkpoint, processors, normalization, fixed10 and metric denominators, reporting
+per-axis flow and physical-action residuals. The observation cohorts differ;
+matched computation does not make them identical samples. Existing compatible
+reports are reused. This diagnosis prioritizes optimization versus data/observation
+hypotheses; it neither proves their cause nor adds a rollout gate. The longer
+9k-hold training fork is not started. Learning owns its diagnostic implementation,
+results and OpenSpec experiment record; no duplicate evaluator or owner is created.
 
 ### Original-transition recollection is now software-connected
 
