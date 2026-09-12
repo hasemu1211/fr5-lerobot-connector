@@ -2,6 +2,25 @@
 
 ## September 12 continuation: LeRobot pick-place integration
 
+Latest physical-input preparation used the existing native full-chunk path, not
+the separate CLI plugin. With the original 12k checkpoint and current A-to-B
+instruction, fresh cameras and seven-joint state produced all 50 actions.
+The explicitly selected existing integer-percent gripper conversion passed its
+range/timing construction, then admission returned `LEARNED_STALE_OBSERVATION`;
+measured inference was 0.158651 s. No learned or gripper goal was sent. Two bounded
+v5 current-position holds passed about ten seconds each. This is not learned
+task success or qualified teardown: MoveIt reported a shutdown-time fault.
+
+The next diagnostic must separate capture, transfer, inference and final
+admission age while retaining one loaded model. Four capture-only observations
+arrived with oldest camera ages about 56–104 ms; they do not pinpoint the age
+overrun in the model attempt. A first local probe omitted the existing gripper
+conversion; a later probe outlived its temporary ROS runtime during model load.
+Those are coordinator harness errors, not model defects. Exact logs and next
+consumer are in `.agent-local/work/lerobot-fr5/native-rhythm40-probe-20260912.md`.
+Do not loosen a bound, select favorable noise or require further training from
+these observations. Existing system authority remains the execution boundary.
+
 The local handoff `.agent-local/wiki/FR5_LeRobot_Rollout_Handoff_20260912.md`
 matched all 19 supplied source fingerprints at inspection. The chosen dataset is
 the separately approved bidirectional pick-place rhythm40 set, TRAIN 0–31 and
@@ -67,8 +86,13 @@ five-second reference horizon after valid quantization. At native ceiling `.1`,
 source-derived held-time necessary budget leaves only 24 not yet excluded.
 These are numerical checks, not execution approvals or physical failure labels.
 Do not select favorable seeds, discard late chunks, or relax limits to claim
-success. Learning's owner is now preparing a research/source-grounded continuation
-of the existing 12k training state; no further GPU run has been launched.
+success. Deterministic four-worker continuation is integrated as `f9c9c47`:
+main's focused continuation/checkpoint suite passes 24 tests; independent immutable
+review of owner `9da584c` passes 18 continuation tests with no scoped findings.
+It preserves native optimizer, scheduler, committed sample cursor and relevant
+CPU RNG history for the admitted deterministic loader, not arbitrary worker RNG
+or stochastic transforms. No further production GPU training has been launched.
+Continuation verification is independent of physical rollout admission.
 
 Preexisting user plugin edits were retained; a recoverable source copy is under
 `.agent-local/work/lerobot-fr5/pre-attempt-evidence-2UjzcV`. Original observations,
