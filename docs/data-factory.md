@@ -13,6 +13,14 @@
 
 한 campaign은 한 번에 하나의 OneJob을 실행한다. 각 시연을 새 작업으로 열고, 저장과 기술 검사가 끝나면 다음 작업으로 이어진다. 작업 판정과 학습 요청은 [별도의 소비 경로](architecture.md#시스템-아키텍처)이다.
 
+### 시연 조건과 접근 궤적
+
+위치·각도를 분산해 시연을 만들고, 물체에 정렬하는 과정이 데이터에 담기도록 정렬 전 관측부터 기록한다.
+
+![목표 근처에서 관측을 시작하고 XY·yaw를 정렬한 뒤 수직 접근하는 시연 경로](portfolio/approach-alignment.drawio.svg)
+
+[공간 표본화](../tools/data_factory/workspace_geometry.py) · [각도 배정](../tools/data_factory/state_space.py) · [접근 궤적](../tools/data_factory/motion/trajectory_variants.py)
+
 ## Acquisition Strategy · 다음 수집 조건
 
 ![현재 조건과 기존 기록을 바탕으로 다음 위치·각도를 제안하고 Collection 초안과 실행 계획에 연결한다.](portfolio/acquisition.drawio.svg)

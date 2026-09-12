@@ -1,6 +1,6 @@
 # Closed-Loop Data Engine for Robot Skill Adaptation
 
-실물 demonstration과 실행 피드백을 잇는 VLA skill adaptation. 구현·검증 플랫폼은 FAIRINO FR5이다.
+조건과 궤적을 설계해 실물 시연을 만들고, 그 데이터로 학습한 VLA 정책을 검증한다. 구현·검증 플랫폼은 FAIRINO FR5이다.
 
 **[포트폴리오 다운로드](https://github.com/hasemu1211/fr5-lerobot-connector/releases/download/portfolio-2026-09-08/FR5-Portfolio.html)** · [시스템 아키텍처](docs/architecture.md)
 
@@ -18,6 +18,7 @@ Pick & Place · 21.1초
 
 | 핵심 기능 | 설계 목적 |
 | --- | --- |
+| 조건·궤적 설계 | [위치·각도 분포와 접근 경로를 정해, 물체 정렬 과정을 포함한 실물 시연을 생성한다.](docs/data-factory.md#시연-조건과-접근-궤적) |
 | 동기 기록 | [영상·관절 상태·그리퍼 명령을 같은 시각의 학습 표본으로 정렬한다.](docs/dataset-quality.md#필수-자동-기준) |
 | 데이터 선별 | [선택한 데이터의 원본과 학습·평가 배정을 유지해 데이터 변경의 영향을 비교한다.](docs/training-and-evaluation.md) |
 | 정책 비교 | [같은 관측에서 생성한 동작을 관절·그리퍼 단위로 비교한다.](docs/training-and-evaluation.md#오프라인-평가) |

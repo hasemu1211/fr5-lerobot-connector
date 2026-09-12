@@ -13,13 +13,13 @@ const story = [
   ['data.html', 'selection', '학습 데이터 선별'],
   ['learning.html', 'rhythm40', 'Pick & Place 학습'],
   ['learning.html', 'inputs', 'Split & Normalization'],
-  ['learning.html', 'cohort', '평가 대상의 보존'],
   ['learning.html', 'model', 'SmolVLA 동작 생성'],
   ['learning.html', 'rhythm40-comparison', '정책 비교'],
   ['architecture.html', 'native-runtime', '정책과 실물 실행'],
   ['architecture.html', 'execution-safety', 'Scene & Execution'],
   ['acquisition.html', 'mechanism', '다음 수집 조건'],
   ['acquisition.html', 'policy', '실행 근거와 데이터 보완'],
+  ['learning.html', 'cohort', '평가 대상의 보존'],
   ['acquisition.html', 'study', '폐루프 실험의 다음 단계'],
 ];
 const page = location.pathname.split('/').pop();
