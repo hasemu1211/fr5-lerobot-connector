@@ -24,7 +24,8 @@ python3 docs/portfolio/export_single_file.py .agent-local/portfolio/FR5-Portfoli
 | `index.html` 및 주제별 HTML | 본문과 화면 구성 |
 | `*.drawio.svg`, `assets/` | 도해·그래프·영상·이미지·글꼴 |
 | `sources/` | 실제 코드·데이터·보고서의 출처와 발췌 |
-| `*.js`, `site.css` | 탐색·상호작용·화면 스타일 |
+| `reading.js` | 원본 구간을 연결하는 발표 순서·다음/이전·근거 복귀 |
+| 그 외 `*.js`, `site.css` | 상호작용·화면 스타일 |
 | `export_single_file.py` | 단일 HTML 생성 |
 
 페이지 주소와 자산 경로는 상호작용과 내보내기에서 함께 사용한다. 파일 이동 전 소비 경로를 확인한다. 초안·스크린샷·생성본은 원본 폴더 밖에 보관한다. 외부 자산의 라이선스는 해당 자산과 함께 유지한다.

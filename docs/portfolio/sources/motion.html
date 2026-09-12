@@ -422,7 +422,53 @@
 1132                          or snapshot[&quot;scene_state&quot;][&quot;revision&quot;] != execution[&quot;scene_revision&quot;]
 1133                          or snapshot[&quot;scene_state&quot;][&quot;objects&quot;].get(plan[&quot;scene_binding&quot;][&quot;object_instance_id&quot;]) != execution[&quot;scene_object&quot;]):
 1134                      raise ContractError(&quot;SCENE_STATE_CHANGED&quot;)
-1135                  self._check_chunk_boundary(run, payload[&quot;lease_id&quot;])</pre><p><a href="recommendation-core.html#scene-context">물체 상태·출처·revision의 정본 ↗</a></p></section><section id="native-runtime"><h2>LeRobot·FR5 실행 연결 · 2026-09-12</h2><a href="../architecture.html#native-runtime">← 실행 구조로 돌아가기</a><p>장비·실물 상태 근거는 main645fe03, 예측 묶음 보존 코드는 main23891ce 기준이다. LeRobot의 추론·처리기·큐를 재사용하며, 장비 실행과 취소는 FR5의 기존 단일 owner로 연결하는 구조이다. 플러그인의 send_action은 아직 실행을 거부한다.</p><p class="locator">plugins/lerobot_robot_fr5/src/lerobot_robot_fr5/fr5.py · main645fe03<br>sha256:f7e262683671a93e68aca0ae13758d7029aac9dcf49078d0032207ec4661c51a</p><pre>396:     def send_action(self, action: dict[str, Any]) -&gt; dict[str, Any]:
+1135                  self._check_chunk_boundary(run, payload[&quot;lease_id&quot;])</pre><p><a href="recommendation-core.html#scene-context">물체 상태·출처·revision의 정본 ↗</a></p></section><section id="live-observation"><a href="../architecture.html#native-runtime">← Physical Rollout</a><h2>실물 관측 기반 native 추론 · 2026-09-12</h2><p>원래 12k Pick &amp; Place checkpoint를 미리 로딩한 뒤 실제 두 카메라 영상과 7차원 로봇 상태로 추론했다. 원본 출력은 50×7이며, 네 번의 관측 시각 검사를 모두 원래 300 ms 기준으로 통과했다. 아래는 원본 JSON의 선택 필드이다.</p><p class="locator">native-rhythm40-probe-20260912-r5.log · 원본 SHA-256: 0e14d3d7b8eed0a890b8efb7c2f765de96d84d2de0c1241f3b5f70bdf033591c</p><pre>{
+  &quot;status&quot;: &quot;REJECTED&quot;,
+  &quot;code&quot;: &quot;LEARNED_SOURCE_PROGRAM&quot;,
+  &quot;inference_s&quot;: 0.15864757203962654,
+  &quot;freshness_checks&quot;: [
+    {
+      &quot;ages_s&quot;: {
+        &quot;camera1&quot;: 0.0741279125213623,
+        &quot;camera2&quot;: 0.08102774620056152,
+        &quot;state&quot;: 0.04655647277832031
+      },
+      &quot;max_age_s&quot;: 0.3,
+      &quot;now_s&quot;: 1789212873.6951437
+    },
+    {
+      &quot;ages_s&quot;: {
+        &quot;camera1&quot;: 0.23288202285766602,
+        &quot;camera2&quot;: 0.23978185653686523,
+        &quot;state&quot;: 0.20531058311462402
+      },
+      &quot;max_age_s&quot;: 0.3,
+      &quot;now_s&quot;: 1789212873.8538978
+    },
+    {
+      &quot;ages_s&quot;: {
+        &quot;camera1&quot;: 0.23288202285766602,
+        &quot;camera2&quot;: 0.23978185653686523,
+        &quot;state&quot;: 0.20531058311462402
+      },
+      &quot;max_age_s&quot;: 0.3,
+      &quot;now_s&quot;: 1789212873.8538978
+    },
+    {
+      &quot;ages_s&quot;: {
+        &quot;camera1&quot;: 0.23288202285766602,
+        &quot;camera2&quot;: 0.23978185653686523,
+        &quot;state&quot;: 0.20531058311462402
+      },
+      &quot;max_age_s&quot;: 0.3,
+      &quot;now_s&quot;: 1789212873.8538978
+    }
+  ],
+  &quot;execution_authorized&quot;: false,
+  &quot;learned_goals_sent&quot;: 0,
+  &quot;gripper_goals_sent&quot;: 0,
+  &quot;task_outcome&quot;: &quot;NOT_EVALUATED&quot;
+}</pre><p>관측 한 번의 결과이다. 지속적인 지연 성능이나 설정 변경에 따른 개선을 증명하지 않는다. 작업 원본의 형식 검사에서 실행 계획 구성이 중단됐고, 학습·그리퍼 goal은 전송되지 않았다. main ab41b19의 v2/v4 원본 검증 수정은 독립 CPU 검토를 통과했지만, 이 과거 출력이 수정 뒤 실물 실행을 증명하지는 않는다. 별도 LeRobot CLI 플러그인의 send_action도 계속 닫혀 있다.</p><p>같은 실행 기록의 자세 유지 관측은 10.003654 s 동안 상태 진행 1,000회를 확인했다. 종료 중 MoveIt 오류가 남았으므로 종료 경로의 검증으로 확대하지 않는다. 실물 동작·과제 성공·학습 권한은 이 추론 출력에서 생기지 않는다.</p></section><section id="native-runtime"><h2>LeRobot·FR5 실행 연결 · 2026-09-12</h2><a href="../architecture.html#native-runtime">← 실행 구조로 돌아가기</a><p>장비·실물 상태 근거는 main645fe03, 예측 묶음 보존 코드는 main23891ce 기준이다. LeRobot의 추론·처리기·큐를 재사용하며, 장비 실행과 취소는 FR5의 기존 단일 owner로 연결하는 구조이다. 플러그인의 send_action은 아직 실행을 거부한다.</p><p class="locator">plugins/lerobot_robot_fr5/src/lerobot_robot_fr5/fr5.py · main645fe03<br>sha256:f7e262683671a93e68aca0ae13758d7029aac9dcf49078d0032207ec4661c51a</p><pre>396:     def send_action(self, action: dict[str, Any]) -&gt; dict[str, Any]:
 397:         # Deliberately fail closed until the FR5 action processor,
 398:         # chunk safety strategy, and actual-sent-action evidence are bound.
 399:         raise RuntimeError(&quot;FR5_ACTION_NOT_AUTHORIZED&quot;)</pre><p>모델이 예측한 전체 동작 묶음을 보존하고, 소비할 행의 수와 순서는 LeRobot의 큐가 관리한다.</p><p class="locator">plugins/lerobot_strategy_fr5/src/lerobot_strategy_fr5/chunk_tap.py · main23891ce<br>sha256:e0e65f0f76c4bcb1f8af439b2c2b0596cc41c94aa290c4651d537f7d8dcfc85e</p><pre>76:             # Native select_action queues only n_action_steps from this full
@@ -474,4 +520,4 @@
 59: hold only. It does not qualify learned Pick success, physical gripper
 60: same-command completion, mechanical task success, or long-duration operation.
 61: Shutdown-time RViz/controller-manager context errors occurred after successful
-62: hardware deactivation and are not counted as execution evidence.</pre><p>실행 전 diagnostic의 NOT_EVALUATED는 실행 평가를 거치지 않은 입력을 뜻한다. 작업 실패나 재수집 deficit으로 분류하지 않는다.</p></section></main></body></html>
+62: hardware deactivation and are not counted as execution evidence.</pre><p>실행 전 diagnostic의 NOT_EVALUATED는 실행 평가를 거치지 않은 입력을 뜻한다. 작업 실패나 재수집 deficit으로 분류하지 않는다.</p></section></main><script src="../reading.js"></script></body></html>
