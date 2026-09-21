@@ -6,9 +6,9 @@
 
 **[발표 HTML 다운로드](https://github.com/hasemu1211/fr5-lerobot-connector/releases/download/portfolio-2026-09-14/FR5-Portfolio.html)** · [발표 자료 열람·생성 안내](docs/portfolio/README.md) · [설계와 구현](docs/engineering-story.md)
 
-[![Pick & Place 시연의 고정 카메라와 손목 카메라 관측](docs/portfolio/assets/recordings/pick-place-latest-poster.jpg)](https://github.com/hasemu1211/fr5-lerobot-connector/releases/download/portfolio-2026-09-14/FR5-Portfolio.html)
+https://github.com/user-attachments/assets/ddaf0013-0103-4397-af53-d3b22047ffc1
 
-Pick & Place 수집 시연 · 21.1초 · 고정·손목 카메라
+프로젝트 소개 · 1분 30초 · 영어 · 실물 시연에서 데이터 구성·정책 비교까지
 
 ## Robot Skill Adaptation
 

@@ -8,9 +8,9 @@ Developing a **physical robot data engine that connects demonstration collection
 
 The presentation and detailed technical documents are in Korean.
 
-[![A generated and recorded Pick & Place demonstration, shown through fixed and wrist cameras](docs/portfolio/assets/recordings/pick-place-latest-poster.jpg)](https://github.com/hasemu1211/fr5-lerobot-connector/releases/download/portfolio-2026-09-14/FR5-Portfolio.html)
+https://github.com/user-attachments/assets/ddaf0013-0103-4397-af53-d3b22047ffc1
 
-Pick & Place data-collection demonstration · 21.1 seconds · fixed and wrist cameras
+Project overview · 90 seconds · English · From physical demonstrations to learning data and policy comparison
 
 ## Robot Skill Adaptation
 
