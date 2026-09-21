@@ -8,6 +8,7 @@ Developing a **physical robot data engine that connects demonstration collection
 
 The presentation and detailed technical documents are in Korean.
 
+<!-- markdownlint-disable-next-line MD034 -- GitHub renders this attachment URL as a video player. -->
 https://github.com/user-attachments/assets/ddaf0013-0103-4397-af53-d3b22047ffc1
 
 Project overview · 90 seconds · English · From physical demonstrations to learning data and policy comparison
