@@ -380,4 +380,23 @@ body:not(.reading-present) main :where(section[id],div[id],h2[id],h3[id]){scroll
 .loop-validation{font-size:14px;line-height:1.8;margin:12px 0}
 .loop-validation strong{margin-right:12px}
 .loop-ownership{font-size:12px;color:var(--muted);line-height:1.8}
+.closing-summary{padding:36px 0}
+.closing-path{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:40px;margin:34px 0}
+.closing-path>div{border-top:2px solid var(--accent);padding-top:16px}
+.closing-path span{font-size:13px;color:var(--accent)}
+.closing-path h3,.reading-stage .closing-path h3{font-size:27px;line-height:1.5;margin:18px 0 12px}
+.closing-path p{font-size:16px;line-height:1.8;max-width:24em}
+.closing-next{border-top:1px solid var(--line);padding-top:20px}
+.closing-next strong{font-size:13px;color:var(--accent)}
+.closing-next p{font-size:21px;margin:8px 0}
+.closing-next span{font-size:15px;color:var(--muted);line-height:1.7}
+/* In the talk, emphasize the visual change. The mask remains in the detail view. */
+@media(min-width:680px){
+ .reading-stage .curator-triptych{grid-template-columns:repeat(2,minmax(0,1fr));gap:32px;max-width:1060px;margin:18px auto}
+ .reading-stage .curator-triptych>figure:nth-child(2){display:none}
+ .reading-stage .curator-triptych .native-panel{max-height:calc(100dvh - 420px);aspect-ratio:4/3;width:auto;margin:auto}
+ .reading-stage .curator-triptych figcaption span{display:none}
+}
+@media(max-width:679px){.closing-path{grid-template-columns:1fr;gap:20px}.closing-path h3{font-size:23px}.closing-next p{font-size:18px}}
+@media(min-width:1000px) and (max-height:800px){.closing-path{margin:20px 0;gap:28px}.reading-stage .closing-path h3{font-size:23px;margin:12px 0}.closing-path p{font-size:14px}.closing-next{padding-top:12px}}
 @media(max-width:850px){.feedback-loop{grid-template-columns:1fr}.project-hero h1.project-title,.reading-stage .project-hero h1.project-title{font-size:38px;max-width:18ch}}

@@ -18,6 +18,7 @@ const story = [
   ['architecture.html', 'native-runtime', '정책을 실물 실행에 연결하기'],
   ['acquisition.html', 'policy', '다음에 모을 시연 선택'],
   ['acquisition.html', 'study', '다음 실험: 수집의 효과'],
+  ['index.html', 'contribution', '구현한 연결과 다음 검증'],
 ];
 const page = location.pathname.split('/').pop();
 const query = new URLSearchParams(location.search);
