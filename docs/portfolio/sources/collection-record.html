@@ -1,4 +1,4 @@
-<!doctype html><html lang="ko"><meta charset="utf-8"><title>실제 수집 기록 — 데이터 엔진</title><link rel="stylesheet" href="../site.css"><main class="source-page"><a href="../collection.html#recorded-example">← 실제 수집 기록으로 돌아가기</a><h1>시연 원본과 재생본</h1><p class="note">보존된 원본의 관련 필드를 발췌했다. SHA-256은 발췌 전 원본 파일을 식별한다. 수집 당시의 판정과 이후의 학습 입력 참조를 구분한다.</p><section id="continuous-pick"><h2>조건을 바꾼 연속 Pick 수집</h2><p>2026-09-07의 같은 수집 계획에 속한 여섯 기록이다. 위치·각도는 실행 요청값이며 PLACE_A 보정 좌표계를 따른다. 앞선 실행의 release proxy가 남긴 배치 상태와 다음 실행의 요청 좌표가 다섯 연결에서 정확히 일치한다. 배치 상태는 독립된 영상 측정값과 구분한다.</p><table><thead><tr><th scope="col">수집 순서</th><th scope="col">X / Y (mm)</th><th scope="col">yaw (°)</th><th scope="col">저장 프레임</th></tr></thead><tbody><tr><th scope="row"><a href="#pick-condition-1">1</a></th><td>-88.75 / 20.20</td><td>-24.73</td><td>370</td></tr><tr><th scope="row"><a href="#pick-condition-2">2</a></th><td>-1.93 / -55.35</td><td>-24.73</td><td>384</td></tr><tr><th scope="row"><a href="#pick-condition-3">3</a></th><td>-3.16 / 33.51</td><td>10.87</td><td>326</td></tr><tr><th scope="row"><a href="#pick-condition-4">4</a></th><td>-106.43 / -15.24</td><td>10.87</td><td>341</td></tr><tr><th scope="row"><a href="#pick-condition-5">5</a></th><td>-13.48 / 13.14</td><td>15.20</td><td>340</td></tr><tr><th scope="row"><a href="#pick-condition-6">6</a></th><td>73.14 / -75.93</td><td>15.20</td><td>364</td></tr></tbody></table><p>여섯 기록 모두 저장 확정(COMMITTED)·기술 검사 PASS이며, 수집 당시 학습 권한은 NOT_AUTHORIZED이다. 본문의 12.1초 영상은 마지막 기록의 전체 364프레임이다.</p><details class="source-details"><summary>원본 필드와 파일 식별값</summary><section id="pick-condition-1"><h3>수집 순서 1</h3><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1/episode_intent.json<br>sha256:3a962b56bd9849be83d5861616566b18d75c007e40add822b5488c3a75f874fb</p><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1/result.json<br>sha256:be6f623ec6510fc7ac2d95c36e46ba4ffe29a50ab816cf2da17e1f936e9773ff</p><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1/episode_ledger.json<br>sha256:2c953e7accbdcbfaa7be08244d4d083b79f01679e85a8221dd64b1b765e13d59</p><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1/execution_response.json<br>sha256:71e34ac6b55c354e84e42dac8baf6e6f51550cde589a9b967ca23d95ab60d47f</p><pre>{
+<!doctype html><html lang="ko"><meta charset="utf-8"><title>실제 수집 기록 — 데이터 엔진</title><link rel="stylesheet" href="../styles/site.css"><main class="source-page"><a href="../collection.html#recorded-example">← 실제 수집 기록으로 돌아가기</a><h1>시연 원본과 재생본</h1><p class="note">보존된 원본의 관련 필드를 발췌했다. SHA-256은 발췌 전 원본 파일을 식별한다. 수집 당시의 판정과 이후의 학습 입력 참조를 구분한다.</p><section id="continuous-pick"><h2>조건을 바꾼 연속 Pick 수집</h2><p>2026-09-07의 같은 수집 계획에 속한 여섯 기록이다. 위치·각도는 실행 요청값이며 PLACE_A 보정 좌표계를 따른다. 앞선 실행의 release proxy가 남긴 배치 상태와 다음 실행의 요청 좌표가 다섯 연결에서 정확히 일치한다. 배치 상태는 독립된 영상 측정값과 구분한다.</p><table><thead><tr><th scope="col">수집 순서</th><th scope="col">X / Y (mm)</th><th scope="col">yaw (°)</th><th scope="col">저장 프레임</th></tr></thead><tbody><tr><th scope="row"><a href="#pick-condition-1">1</a></th><td>-88.75 / 20.20</td><td>-24.73</td><td>370</td></tr><tr><th scope="row"><a href="#pick-condition-2">2</a></th><td>-1.93 / -55.35</td><td>-24.73</td><td>384</td></tr><tr><th scope="row"><a href="#pick-condition-3">3</a></th><td>-3.16 / 33.51</td><td>10.87</td><td>326</td></tr><tr><th scope="row"><a href="#pick-condition-4">4</a></th><td>-106.43 / -15.24</td><td>10.87</td><td>341</td></tr><tr><th scope="row"><a href="#pick-condition-5">5</a></th><td>-13.48 / 13.14</td><td>15.20</td><td>340</td></tr><tr><th scope="row"><a href="#pick-condition-6">6</a></th><td>73.14 / -75.93</td><td>15.20</td><td>364</td></tr></tbody></table><p>여섯 기록 모두 저장 확정(COMMITTED)·기술 검사 PASS이며, 수집 당시 학습 권한은 NOT_AUTHORIZED이다. 본문의 12.1초 영상은 마지막 기록의 전체 364프레임이다.</p><details class="source-details"><summary>원본 필드와 파일 식별값</summary><section id="pick-condition-1"><h3>수집 순서 1</h3><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1/episode_intent.json<br>sha256:3a962b56bd9849be83d5861616566b18d75c007e40add822b5488c3a75f874fb</p><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1/result.json<br>sha256:be6f623ec6510fc7ac2d95c36e46ba4ffe29a50ab816cf2da17e1f936e9773ff</p><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1/episode_ledger.json<br>sha256:2c953e7accbdcbfaa7be08244d4d083b79f01679e85a8221dd64b1b765e13d59</p><p class="locator">outputs/data_factory/runs/collection-production-20260907-rhythm-a-r1-campaign-0001-run-1/execution_response.json<br>sha256:71e34ac6b55c354e84e42dac8baf6e6f51550cde589a9b967ca23d95ab60d47f</p><pre>{
   &quot;episode_intent&quot;: {
     &quot;order_index&quot;: 0,
     &quot;coverage_condition&quot;: {
@@ -338,7 +338,7 @@
     }
   ],
   &quot;delivery&quot;: {
-    &quot;file&quot;: &quot;docs/portfolio/assets/pick-latest.mp4&quot;,
+    &quot;file&quot;: &quot;docs/portfolio/assets/recordings/pick-latest.mp4&quot;,
     &quot;sha256&quot;: &quot;375842394add931054a182939606886979368601130bacd0772e48b5d515b9a8&quot;,
     &quot;bytes&quot;: 881471,
     &quot;probe&quot;: {
@@ -479,7 +479,7 @@
     }
   ],
   &quot;delivery&quot;: {
-    &quot;file&quot;: &quot;docs/portfolio/assets/pick-place-latest.mp4&quot;,
+    &quot;file&quot;: &quot;docs/portfolio/assets/recordings/pick-place-latest.mp4&quot;,
     &quot;sha256&quot;: &quot;9f2f975639f03fed237e18ba82edb87856b656d6712af0b2c08ae674e679b63f&quot;,
     &quot;bytes&quot;: 1378455,
     &quot;probe&quot;: {
@@ -965,7 +965,7 @@
     }
   ],
   &quot;presentation_video&quot;: {
-    &quot;file&quot;: &quot;assets/pickup-recording.mp4&quot;,
+    &quot;file&quot;: &quot;assets/recordings/pickup-recording.mp4&quot;,
     &quot;sha256&quot;: &quot;f935510fd4c929eaeb821e681944f6df1796d2ff84a7317f6d2ec96c7ddb5194&quot;,
     &quot;bytes&quot;: 3470118,
     &quot;frames&quot;: 633,
@@ -976,8 +976,8 @@
     &quot;transform&quot;: &quot;hstack: UP left, WRIST right; H.264 CRF22; original speed; no cropping or temporal trimming&quot;
   },
   &quot;poster&quot;: {
-    &quot;file&quot;: &quot;assets/pickup-recording-poster.jpg&quot;,
+    &quot;file&quot;: &quot;assets/recordings/pickup-recording-poster.jpg&quot;,
     &quot;sha256&quot;: &quot;b768019db595b1f54c5e8f6fdb5084a3d7b02bd269813473298cce1facd0c671&quot;,
     &quot;time_seconds&quot;: 10.533333333333333
   }
-}</pre></section></main><script src="../source-return.js"></script><script src="../reading.js"></script></html>
+}</pre></section></main><script src="../scripts/source-return.js"></script><script src="../scripts/reading.js"></script></html>

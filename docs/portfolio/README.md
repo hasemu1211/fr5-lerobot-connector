@@ -1,6 +1,14 @@
-# Closed-Loop Data Engine · 포트폴리오
+# 로봇 데이터 엔진 · 발표 자료
 
 **[포트폴리오 다운로드](https://github.com/hasemu1211/fr5-lerobot-connector/releases/download/portfolio-2026-09-14/FR5-Portfolio.html)**
+
+한국어 발표 자료다. 다운로드한 HTML 하나를 브라우저로 열면 영상·그림·상세 설명을 함께 볼 수 있다. 별도 설치나 서버는 필요하지 않다.
+
+- 좌우 방향키 또는 하단의 이전·다음으로 발표를 넘긴다.
+- **상세 보기**에서 해당 주제의 원리·구현을 살펴보고 **발표로 돌아가기**로 복귀한다.
+- 영상은 재생 버튼을 눌러 본다. 화면 확대 없이 기본 배율로 시작한다.
+
+공개 다운로드는 아래 원본으로 생성한 단일 HTML을 제공한다. 릴리스 주소의 날짜는 최초 배포일이며, 파일 갱신 시점과 체크섬은 GitHub 릴리스에서 확인할 수 있다.
 
 [시스템 아키텍처](../architecture.md) · [데이터셋 품질](../dataset-quality.md) · [학습과 평가](../training-and-evaluation.md)
 
@@ -12,29 +20,58 @@
 저장소 루트에서 Python 3으로 실행한다. 추가 패키지는 필요하지 않다.
 
 ```sh
-python3 docs/portfolio/export_single_file.py .agent-local/portfolio/FR5-Portfolio.html
+python docs/portfolio/build/export_single_file.py outputs/portfolio/FR5-Portfolio.html
 ```
 
-이미지·동영상·글꼴·근거 페이지를 포함해 50MB 미만의 파일을 생성하고, 파일 크기와 SHA-256을 출력한다. 수정은 이 폴더의 원본에 반영한 뒤 같은 명령으로 다시 생성한다.
+이미지·동영상·글꼴·근거 페이지를 포함해 50MB 미만의 파일을 생성하고, 파일 크기와 SHA-256을 출력한다. Windows·Linux에서 같은 명령을 사용하며 Python 실행명이 `python3`인 환경에서는 바꿔 실행한다. `outputs/`는 Git 추적에서 제외된다. 수정은 이 폴더의 원본에 반영한 뒤 다시 생성한다.
 
 ## 편집 원본
 
 | 위치 | 용도 |
 | --- | --- |
 | `index.html` 및 주제별 HTML | 본문과 화면 구성 |
-| `*.drawio.svg`, `assets/` | 도해·그래프·영상·이미지·글꼴 |
+| `diagrams/` | 편집 가능한 구조·원리 도식 |
+| `assets/` | 실제 영상·관측 표본·화면 캡처·결과 그래프 |
 | `sources/` | 실제 코드·데이터·보고서의 출처와 발췌 |
-| `reading.js` | 원본 구간을 연결하는 발표 순서·다음/이전·근거 복귀 |
-| 그 외 `*.js`, `site.css` | 상호작용·화면 스타일 |
-| `export_single_file.py` | 단일 HTML 생성 |
+| `scripts/reading.js` | 원본 구간을 연결하는 발표 순서·다음/이전·근거 복귀 |
+| `scripts/`, `styles/` | 상호작용·화면 스타일 |
+| `build/` | 단일 HTML 생성과 패키징 회귀 검사 |
+
+```text
+portfolio/
+├── index.html · 주제별 HTML
+├── scripts/                 # 발표 탐색·상호작용·표본 데이터
+├── styles/                  # 글꼴과 반응형 레이아웃
+├── diagrams/                # 아키텍처·설계 도식
+├── assets/
+│   ├── recordings/          # 실제 영상과 포스터
+│   ├── observations/        # 시연별 카메라 표본
+│   ├── screenshots/         # 운영·검토 화면
+│   ├── charts/              # 측정 결과 그래프
+│   ├── fonts/
+│   └── licenses/
+├── sources/                 # 구현·실험 근거
+└── build/                   # 생성기·회귀 검사
+```
+
+```sh
+python docs/portfolio/build/test_export.py
+npm run docs:lint
+```
+
+검사는 파일·앵커·동적 자산 경로와 단일 파일의 원본 보존을 확인한다. 시각적 완성도와 발표 흐름은 생성한 HTML에서 별도로 리허설한다.
+
+새로 작성한 SVG는 사용한 한글 글꼴을 내부에 포함해 다른 PC에서도 글자 폭과 정렬을 유지한다. 해당 그림의 문구를 바꿨다면 `fonttools`, `brotli`가 설치된 편집 환경에서 `python docs/portfolio/build/embed_diagram_fonts.py diagrams/collection-study.svg`처럼 다시 생성한다. 일반 열람과 HTML 내보내기에는 이 패키지가 필요하지 않다. 글꼴 라이선스는 `assets/fonts/`에 보존한다.
 
 페이지 주소와 자산 경로는 상호작용과 내보내기에서 함께 사용한다. 파일 이동 전 소비 경로를 확인한다. 초안·스크린샷·생성본은 원본 폴더 밖에 보관한다. 외부 자산의 라이선스는 해당 자산과 함께 유지한다.
 
-편집 판단은 [OpenSpec의 다섯 원칙](../../openspec/changes/establish-portfolio-proof-loop-intent/specs/portfolio-proof-loop/spec.md#requirement-portfolio-feedback-improves-the-reader-experience-while-preserving-core-value)을 따른다. 목적과 기술적 기여를 앞세우고 반복 설명을 줄이며, 각 주제에 적합한 매체를 선택한다.
+목적과 수행한 일을 앞세우고, 각 자료의 역할에 맞게 개요와 기술 상세를 구분한다. 목차·화면 수·그림은 실제 발표 리허설 결과에 따라 조정한다. 제목과 그림을 그대로 되풀이하는 설명, 내용 없는 안내 문구는 줄인다. 한 화면의 중심 메시지를 분명히 하되 아키텍처의 필요한 복잡성은 상세에서 보존한다.
+
+공개 설명의 책임은 이 문서와 `docs/`의 주제별 문서에 있다. 로컬 작업 관리용 OpenSpec의 지시·진행 기록에는 의존하지 않는다. 설계 변경은 아키텍처, 데이터 판정은 데이터셋 품질, 실험 조건과 결과는 학습·평가 문서에 반영한 뒤 발표의 근거 페이지와 연결한다.
 
 작업명은 **Pick · Pick & Place**, 모듈명은 실제 아키텍처의 **Collection Operator · Recorder · Curator · Training Review · Policy Learning**을 일관되게 사용한다. 한국어는 목적과 원리를 설명하며, 원본 코드·데이터 식별자는 보존한다.
 
-프로젝트의 개발 방향은 **Robot Skill Adaptation**이다. 상위 작업 목표·skill 구성과 실물 적응의 관계는 개요도로, 작업 조건과 실행 원본의 대응은 계약 도해로 드러낸다. task·skill·policy를 고정된 상하 모듈로 취급하지 않는다. README와 포트폴리오는 같은 그림을 재사용한다. 계약은 native 정의·검증·실제 소비에서 추상화하며 새 schema 정본을 만들지 않는다. 상위 시스템의 입력·피드백 소비는 확장 방향으로 구분하고, 구현된 내부 소비와 연결한다.
+개요는 처음 보는 사람이 수행한 일을 이해하도록 구성하고, 아키텍처 상세는 책임·데이터 흐름·실행 경계를 설명한다. 필요한 복잡성은 보존하되 모든 독자가 처음부터 읽도록 강제하지 않는다. 수집 시연과 학습 정책 실행, 현재 구현과 향후 계획은 정확하게 구분한다.
 
 새 근거는 기존 `sources/` 연결에 반영한다. 설명용 예시, 실제 시연, 오프라인 정책 비교와 폐루프의 목표를 구분하고, 달성한 범위를 넘어 성능을 주장하지 않는다. 전달 전에는 단일 파일에서 바뀐 구간의 가독성·조작·근거 복귀를 직접 확인한다.
 

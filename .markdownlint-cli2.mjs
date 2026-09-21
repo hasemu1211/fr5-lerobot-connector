@@ -5,5 +5,5 @@ export default {
     MD033: false,
     MD041: true,
   },
-  globs: ["README.md", "docs/**/*.md"],
+  globs: ["README.md", "README.en.md", "docs/**/*.md"],
 };

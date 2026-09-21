@@ -1,6 +1,6 @@
 # 운영자 런북
 
-이 문서는 장비를 준비하고 수집을 운영하는 사람의 절차와 중단 경계를 소유한다. 명령을 실행하기 전에 현재 장비 상태와 작업 공간을 직접 확인한다. 문서의 예시는 권한을 부여하지 않으며, 실제 실행은 코드의 현재 검사와 사람의 판단을 모두 통과해야 한다.
+장비 준비부터 수집, 중단과 복구까지 운영자가 확인할 순서를 설명한다. 실행 전에는 현재 장비 상태와 작업 공간을 직접 확인하고, 화면의 준비 상태가 실제 장비와 일치하는지 확인한다. 문서의 예시만으로 실행을 승인하지 않으며, 실제 실행은 코드의 현재 검사와 사람의 판단을 모두 통과해야 한다.
 
 ## 안전 우선 확인
 
@@ -14,15 +14,15 @@ gripper나 fingertip을 교체하면 질량·무게중심·TCP·collision을 갱
 
 ## 로봇 없는 운영 흐름
 
-변경 없는 UI 확인은 [시작하기](getting-started.md)의 FAKE 명령으로 한다. FAKE 실행은 물리 장치, production dataset과 training authority에 영향을 주지 않는다. 화면의 여섯 단계는 `environment → plan → review → execution → results → next campaign` 순서로 읽는다.
+[시작하기](getting-started.md)의 FAKE 명령으로 임시 작업공간에서 합성 수집을 진행한다. 화면의 실행 상태와 결과는 바뀌지만 실제 로봇이나 운영 데이터셋에는 영향을 주지 않는다. 장비 준비나 실제 시연 수집이 완료됐다는 근거로 사용하지 않는다. 화면은 `환경 → 계획 → 검토 → 실행 → 결과 → 다음 수집` 순서로 읽는다.
 
 ## 물리 수집 전
 
 1. 노트북 설치와 읽기 전용 doctor를 완료하고, 장비별 설정은 `config/fr5.env.example`에서 필요한 값만 복사한다.
-2. 유선 제어망, controller, camera, gripper의 foreground owner를 확인한다. 장치 경로는 `/dev/videoN`이 아니라 serial 또는 stable `by-id` 식별자를 사용한다.
+2. 유선 제어망과 장비 연결을 확인하고, 각 장치를 제어하는 프로그램이 중복 실행되지 않았는지 확인한다. 카메라는 재부팅 때 바뀔 수 있는 `/dev/videoN` 대신 serial 또는 고정된 `by-id` 식별자로 연결한다.
 3. 카메라 role/profile, 640×480 RGB 입력, source timestamp와 30 Hz profile을 확인한다. camera framing이나 object visibility를 자동 semantic 승인으로 해석하지 않는다.
 4. 작업·물체·workspace·frame·start·scene·cell 조합이 등록되고 적격화됐는지 확인한다. catalog에 보인다는 사실은 실행 권한이 아니다.
-5. plan-only 결과의 exact digest와 scope를 사람이 검토한 뒤에만 실행 권한을 사용한다. campaign은 finite하고 episode마다 fresh `OneJob`을 사용한다.
+5. 실행 없이 만든 계획에서 작업 조건·시연 수·이동 순서를 검토한다. 검토한 계획과 실행할 계획의 식별값이 같은지 확인한 뒤 승인한다. 수집 횟수는 미리 정하고, 각 시연을 시작할 때 새 `OneJob`에서 장비와 기록 준비 상태를 다시 확인한다.
 
 현재 제공되는 물리 caller는 등록된 좁은 작업 범위와 기존 exact-plan/safety 검사에 한정된다. 새 host, camera, object, task, workspace, ID/OOD 수집, depth·image semantics, 자동 semantic PASS와 training approval은 이 런북으로 승인하지 않는다.
 
@@ -34,7 +34,7 @@ OneJob은 motion을 보내기 전 짧은 recorder 준비 구간에서 상단 카
 
 실행 중 조명 변화나 각 후속 동작 앞의 밝기를 계속 검사하는 기능은 제공하지 않는다. 운영자가 조명과 카메라 가시성을 관찰해야 한다. 시작 전 영상 검사는 물체 인식·작업 성공 판정·안전용 조도 센서를 대신하지 않으며, 자동 노출을 포함한 실제 소등 검증 전에는 무인 운전의 보장으로 사용할 수 없다.
 
-실행 중에는 한 번에 하나의 active child만 둔다. 화면은 backend의 atomic projection만 표시하며 자동 재시도·client-side approval·숨은 queue를 만들지 않는다. `문제 있음 · 즉시 중단`은 언제나 사용할 수 있어야 한다.
+한 번에 하나의 수집 작업만 실행한다. 정상 연결 상태에서는 `문제 있음 · 즉시 중단`으로 중단을 요청할 수 있다. 연결이 끊기거나 상태가 오래되면 화면 조작이 비활성화될 수 있으므로, 화면의 중단 요청을 하드웨어 비상정지와 같은 기능으로 취급하지 않는다.
 
 technical PASS가 나와도 의미 있는 작업 성공을 뜻하지 않는다. 사람은 preview에서 작업 대상·손가락·작업 공간·목표 영역을 확인하고, 그 결과를 training approval과 별도로 기록한다. 실패하거나 중단된 episode를 성공 수량에 넣지 않는다.
 
@@ -44,7 +44,7 @@ technical PASS가 나와도 의미 있는 작업 성공을 뜻하지 않는다. 
 
 ## 브라우저 운영 경계
 
-browser는 robot, recorder, dataset, campaign 또는 review state의 owner가 아니다. server가 제공한 token은 local page channel의 possession만 증명하고 OS 인증이나 사람의 신원을 증명하지 않는다. stale view, replayed intent, revision rollback, unknown enum, cancel-pending 또는 bridge 장애는 모두 mutation을 거부하고 `currentView`를 지우며 controls를 비활성화한 뒤 fail-closed 복구 shell만 표시한다.
+실행 상태는 서버가 관리하고 브라우저는 이를 표시한다. 연결이 끊기거나 응답을 신뢰할 수 없으면 조작을 막고, 마지막으로 확인한 내용을 ‘오래된 정보’로 표시한다. 일부 통신 장애에서는 상태 조회만 최대 세 번 재시도하며 동작 요청은 자동으로 다시 보내지 않는다. 화면이 멈췄다고 로봇도 멈췄다고 판단하지 말고 현장에서 상태를 확인한다. 접속 토큰은 로컬 화면의 연결을 확인하는 용도이며 사람의 신원을 인증하지 않는다.
 
 ## 로컬 명령줄 클라이언트
 

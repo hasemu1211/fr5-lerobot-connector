@@ -6,9 +6,9 @@
 
 양방향 시연 40개를 TRAIN 32개와 heldout 8개로 분리해 SmolVLA base에서 12,000 step을 학습했다. Batch 4, 시각·언어 모델(VLM) 고정, action expert 학습이며 saved pre/postprocessor와 TRAIN 정규화 통계를 보존했다.
 
-![같은9k 부모에서 학습률 감소와 유지를 비교한12k·15k·18k의 flow loss·J6·gripper 오차](portfolio/assets/rhythm40-schedule.svg)
+![같은9k 부모에서 학습률 감소와 유지를 비교한12k·15k·18k의 flow loss·J6·gripper 오차](portfolio/assets/charts/rhythm40-schedule.svg)
 
-같은 9k checkpoint에서 학습률을 다르게 적용해 18k까지 비교했다. 원래 12k 모델에 비해 학습률 유지 18k 모델은 J6 RMSE가 5.25% 감소하고 그리퍼 RMSE가 17.05% 증가했다. 8개 시연의 24개 관측과 동일한 3개 noise seed를 사용한 오프라인 결과이다. [학습 계보·조건·원본](https://github.com/hasemu1211/fr5-lerobot-connector/blob/816de823590ad1315c7a6d575713fe660d25a1a8/openspec/changes/learning-evaluation-loop/design.md#completed-lr-tail-evidence-and-stopping-decision-2026-09-13)
+같은 9k checkpoint에서 학습률을 다르게 적용해 18k까지 비교했다. 원래 12k 모델에 비해 학습률 유지 18k 모델은 J6 RMSE가 5.25% 감소하고 그리퍼 RMSE가 17.05% 증가했다. 8개 시연의 24개 관측과 동일한 3개 noise seed를 사용한 오프라인 결과이다. [학습 계보·조건·원본](#schedule-comparison)
 
 실물 정책 시험에서는 초기 ARM 2구간의 완료 뒤 상태 검사에서 중단됐으며 Pick & Place 성공은 확인되지 않았다. 현재 연속 Rollout은 LeRobot의 비동기 추론·큐와 FR5의 실행 소유자를 연결하는 구조로 개발 중이다. 구성요소의 검사·전송·취소 연결과 전체 공개 호출의 완성 범위를 [실행 아키텍처](architecture.md#scene--execution)에서 구분한다.
 
@@ -25,11 +25,35 @@
 
 </details>
 
+<a id="schedule-comparison"></a>
+
+## 학습률 비교의 조건과 판단
+
+같은 9,000 step 부모의 optimizer·RNG·누적 표본 상태에서 분기했다. 기존 경로는 12,000 step 이후 학습률 `2.5e-6`을 사용하고, 비교 경로는 9,000 step의 `9.456213946819498e-6`을 유지했다. 데이터·32/8 분할·TRAIN 정규화·batch 4·고정 VLM은 같았다.
+
+| 경로 | Step | Flow loss | J6 RMSE (°) | Gripper RMSE (mm) |
+| --- | --- | --- | --- | --- |
+| 기존 감소 | 12,000 | 0.226981 | 18.321 | 0.5401 |
+| 기존 감소 | 15,000 | 0.236296 | 18.749 | 0.5218 |
+| 기존 감소 | 18,000 | 0.235777 | 18.462 | 0.5780 |
+| 9k 학습률 유지 | 12,000 | 0.226781 | 17.932 | 0.5071 |
+| 9k 학습률 유지 | 15,000 | 0.230258 | 18.142 | 0.4748 |
+| 9k 학습률 유지 | 18,000 | 0.225343 | 17.358 | 0.6322 |
+
+24개 개발용 관측과 3개 paired inference seed를 사용해 모델당 72개 chunk를 비교했다. 관절 오차의 감소가 그리퍼 개선과 함께 나타나지는 않아 한 모델을 일괄 우승자로 선정하지 않았다. 비교 후보와 원래 기준 모델을 보존하고 실물 평가·데이터 보강으로 판단을 이어간다. 세 추론 seed는 독립 학습 반복이 아니며 개발용 관측의 오프라인 오차는 실물 성공률과 구분한다. [원본 보고서 식별값과 비교 발췌](portfolio/sources/learning-comparison.html#schedule-comparison)
+
 ## Observation → Action Chunk
 
-![두 RGB 영상·작업 지시·7D 로봇 상태를 SmolVLA의 맥락 특징으로 변환하고, Action Expert가 50 × 7 동작 묶음을 생성한다.](portfolio/policy-model.drawio.svg)
+정책은 두 카메라 영상, 현재 관절·그리퍼 상태와 작업 지시를 보고 앞으로의 목표 자세들을 한 묶음으로 예측한다. 예측값은 저장된 정규화 통계로 물리 단위로 되돌린다. 동작 묶음의 계산과 로봇의 실제 작업 성공은 별도로 확인한다.
+
+<details>
+<summary>SmolVLA 모델 구조와 입력·출력</summary>
+
+![두 RGB 영상·작업 지시·7D 로봇 상태를 SmolVLA의 맥락 특징으로 변환하고, Action Expert가 50 × 7 동작 묶음을 생성한다.](portfolio/diagrams/policy-model.drawio.svg)
 
 [NativeSmolVLA의 입력·동작 복원 구현](../tools/data_factory/learned_action_adapter.py)
+
+</details>
 
 <details>
 <summary>지원 profile · 카메라와 action 계약</summary>
@@ -50,9 +74,9 @@ FR5 action은 절대 joint-position과 gripper를 포함하는 7D 계약이다. 
 
 ## Split & Normalization
 
-![선택한 시연을 TRAIN과 평가로 분리하고 TRAIN 통계로 학습을 정규화한다. 평가와 출력 복원은 checkpoint에 저장한 같은 통계를 사용한다.](portfolio/normalization-rhythm40.drawio.svg)
+![선택한 시연을 TRAIN과 평가로 분리하고 TRAIN 통계로 학습을 정규화한다. 평가와 출력 복원은 checkpoint에 저장한 같은 통계를 사용한다.](portfolio/diagrams/normalization-rhythm40.drawio.svg)
 
-그림은 현재 Pick & Place 학습의 32/8 분할이다. 데이터 선택을 바꿔도 평가 대상을 유지하고, 평가 시연이 정규화 기준에 섞이지 않도록 실제 trainer의 분할·통계를 검증한다.
+관절 각도와 그리퍼 벌림 폭은 단위와 값의 범위가 달라 학습 전에 정규화한다. 이 기준은 학습 시연 32개에서만 계산하고, 평가 시연 8개에는 같은 기준을 적용한다. 학습 데이터를 바꾸면 정규화 척도도 달라질 수 있으므로, 정책 간 비교에는 각 모델의 출력을 다시 각도와 길이로 복원해 사용한다.
 
 | 바꾸는 것 | 보존하는 비교 기준 | 확인하는 결과 |
 | --- | --- | --- |
@@ -154,7 +178,9 @@ scripts/train_policy.sh --continue-from "$PARENT_CHECKPOINT" \
 
 `--steps`는 추가 update 수가 아닌 **절대 종료 step**이다. `preserve`는 부모의 원래 native scheduler horizon과 이후 LR을 보존한다. `hold`는 부모 step까지의 LR을 유지하고 그 시점 LR로 이후 구간을 고정한다. 이는 명시적인 미래 schedule 변경이며 rewarm이나 optimizer reset이 아니다. 이미 hold한 자식의 `preserve`도 기존 hold를 계승한다. 그 밖의 recipe·dataset·분할·TRAIN 정규화는 부모에게서 상속하며 현재 승인과 새 output을 기존 admission 경계에서 검증한다. dry-run은 학습 output을 만들지 않는다.
 
-지원 범위는 native SmolVLA, single process, workers0, deterministic transforms, no AMP/compile/streaming/weighted sampling이다. native optimizer·scheduler·RNG 파일과 함께 `training_state/fr5_continuation_state.json`에 optimizer가 실제 소비한 epoch·offset·누적 sample 수, 원래 horizon·hold 경계, Gaussian RNG cache를 저장한다. 두 번째 resume도 최신 batch와 절대 step의 곱으로 과거 노출량을 다시 계산하지 않는다. 이전 legacy resume으로 누적 이력을 잃은 부모는 거부하며, legacy 파일이 누락한 과거 Gaussian cache는 복구했다고 주장하지 않는다. 평가 cadence를 바꾸면 이후 RNG 소비도 달라지므로 동등성 비교에서는 cadence를 고정한다. CPU-small native 반복 resume과 admission 검증은 완료했으며 실제 정책의 GPU continuation·독립 reload는 추가 검증 대상이다.
+지원 범위는 native SmolVLA, single process, workers0, deterministic transforms, no AMP/compile/streaming/weighted sampling이다. native optimizer·scheduler·RNG 파일과 함께 `training_state/fr5_continuation_state.json`에 optimizer가 실제 소비한 epoch·offset·누적 sample 수, 원래 horizon·hold 경계, Gaussian RNG cache를 저장한다. 두 번째 resume도 최신 batch와 절대 step의 곱으로 과거 노출량을 다시 계산하지 않는다. 이전 legacy resume으로 누적 이력을 잃은 부모는 거부하며, legacy 파일이 누락한 과거 Gaussian cache는 복구했다고 주장하지 않는다. 평가 cadence를 바꾸면 이후 RNG 소비도 달라지므로 동등성 비교에서는 cadence를 고정한다.
+
+CPU 소형 모델에서는 반복 재개와 입력 검증을 확인했다. 실제 FR5 정책의 9k 분기·18k 학습 연장과 저장 모델의 오프라인 비교는 [학습률 비교](#schedule-comparison)에 제시한다. 이 기록을 batch 변경이나 반복 재개를 포함한 모든 지원 조합의 검증으로 확대하지 않는다. 새로운 조합에서는 해당 실행의 상태 연속성과 독립 재로딩을 별도로 확인한다.
 
 ### TRAIN 정규화와 checkpoint
 
@@ -235,7 +261,7 @@ direnv exec . scripts/evaluate_smolvla.sh --check-env
 
 `train_config.json`의 nominal scheduler 값만으로 실제 LR 경로를 판단하지 않는다. native config 검증 이후 optimizer parameter group의 LR, scheduler 초기값·전환점·종료값과 저장된 scheduler state를 연결한다. `use_policy_training_preset=true`인 새 실행은 top-level optimizer/scheduler를 policy preset으로 다시 설정하므로 LR 변경에는 `policy.optimizer_lr`를 사용하고 실제 resolved 값을 확인한다. 별도 native scheduler를 비교하려면 `use_policy_training_preset=false`와 optimizer·scheduler 모두가 필요하다. feature profile은 hyperparameter recipe를 소유하지 않는다.
 
-전체 horizon 변경은 같은 초기 step의 LR도 바꾼다. 종료까지 decay한 smoke의 resume은 처음부터 더 긴 horizon으로 실행한 것과 같은 비교군이 아니다. batch 비교도 동일 update 수에서는 sample 노출량이 다르므로 처리량 비교와 학습 효과 비교를 구분한다. 실제 accumulation이 없는 실행의 effective batch를 임의로 부풀리거나 AMP를 BF16으로 단정하지 않는다. 초기 선택·경쟁 가설·변경 조건은 [Learning 설계](../openspec/changes/learning-evaluation-loop/design.md)를 따른다.
+전체 horizon 변경은 같은 초기 step의 LR도 바꾼다. 종료까지 decay한 smoke의 resume은 처음부터 더 긴 horizon으로 실행한 것과 같은 비교군이 아니다. batch 비교도 동일 update 수에서는 sample 노출량이 다르므로 처리량 비교와 학습 효과 비교를 구분한다. 실제 accumulation이 없는 실행의 effective batch를 임의로 부풀리거나 AMP를 BF16으로 단정하지 않는다. 학습 설정의 변경은 데이터·모델·평가 대상을 보존한 비교로 판단한다. [학습률 비교](#schedule-comparison)에서는 관절과 그리퍼의 상반된 결과를 함께 보고 후보를 보존했다.
 
 [SmolVLA 원 논문](https://huggingface.co/papers/2506.01844)은 작은 policy와 공개 robot data를 이용한 학습을 연구한다. [저자들의 현재 LeRobot 안내](https://huggingface.co/docs/lerobot/smolvla)는 작은 batch부터 시도하고 작업 변형마다 충분한 시연을 확보하도록 설명한다. 안내의 다른 robot·dataset 학습량이나 성공률은 FR5의 episode 수·학습 budget·일반화 보장이 아니다. 성공 data의 조건별 coverage와 held-out 오차도 실패 data와 함께 다음 수집의 근거로 사용한다.
 

@@ -50,4 +50,6 @@ direnv exec . python3 tools/a4_place_yaw/generate_place_yaw_a4.py \
 
 Web UI 자동 표본기는 이 polygon을 물체 footprint와 해당 frame의 보정 불확실성만큼 안쪽으로 침식한 뒤 5×3 층화 표본을 만든다. polygon 검증·안전 침식·표본 생성은 분리되어 있어 convex polygon 모양을 바꿔도 UI나 motion owner를 바꾸지 않는다.
 
-이 파일들은 인쇄·배치 준비물일 뿐 motion 자격이 아니다. 각 A4를 해당 작업영역에 포개 고정하고 영속 region binding이 검증되기 전에는 학습 문장에 RED/BLUE를 넣지 않는다. PDF는 설치된 `svglib`/`reportlab`을 우선 사용하고, 없으면 시스템 `libreoffice` 변환기를 사용한다.
+이 파일들은 인쇄·배치 준비물일 뿐 motion 자격이 아니다. 각 A4를 해당 작업영역에 포개 고정하고 실제 배치와 저장된 region binding이 일치하는지 확인한다. 현재 작업 지시 생성은 출발·도착 영역의 layout digest가 같고 두 상태가 `PREPARED_NOT_VERIFIED` 또는 `VERIFIED`이면 RED/BLUE 명칭을 사용한다. 따라서 색상 지시문 자체가 실물 배치 검증 완료를 의미하지 않는다. 이 구분은 [작업·기록 계약 구현](../data_factory/task_recipe.py)의 `task_binding_instruction`과 episode instruction schema가 관리한다.
+
+PDF는 설치된 `svglib`/`reportlab`을 우선 사용하고, 없으면 시스템 `libreoffice` 변환기를 사용한다.

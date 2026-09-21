@@ -6,6 +6,9 @@
 /.omx/
 /omx_wiki/
 /.docs-governance/
+/openspec/
+/.mex/
+/.agent-local/
 /datasets/
 /outputs/
 /RESEARCH/

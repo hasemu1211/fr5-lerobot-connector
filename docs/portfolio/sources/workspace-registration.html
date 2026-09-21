@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>실물 작업영역 등록 · 측정과 검사</title><link rel="stylesheet" href="../styles/site.css"></head><body>
+<main class="source-page"><a href="../collection.html#workspace-registration">← 작업영역 등록으로 돌아가기</a><h1>실물 작업영역 등록</h1>
+<p>종이의 위치·각도와 로봇의 입력을 같은 정의에서 생성하고, 실물 기준점으로 등록한 사례다. 아래 값은 저장소의 측정·등록 설정에서 발췌했다.</p>
+<section id="registration"><h2>두 점으로 축을 정하고, 다른 점으로 확인</h2>
+<p>A4 가로 297×210mm에 CENTER=(148.5,105), X_REF=(277,105), Y_CHECK=(20,185)mm를 둔다. CENTER→X_REF를 주어진 테이블 평면에 투영해 X축을 만들고, 평면 법선과 X축의 외적으로 Y축을 만든다. Y_CHECK는 축 계산에 넣지 않고 예상 위치와 측정 위치의 잔차를 확인한다.</p>
+<p>현재 등록의 평면 법선은 [0,0,1]이다. 세 점으로 임의의 평면을 새로 맞추는 방식과 구분한다. 위치·yaw 변환은 같은 시트 계열과 TCP 설정에 연결된다.</p>
+<p><a href="https://github.com/hasemu1211/fr5-lerobot-connector/blob/0b23f6a26976b6c6e18cff79809d9553ae2dc2ef/tools/a4_place_yaw/generate_place_yaw_a4.py">인쇄물·JSON 생성기</a> · <a href="https://github.com/hasemu1211/fr5-lerobot-connector/blob/0b23f6a26976b6c6e18cff79809d9553ae2dc2ef/tools/fr5_data_factory.py#L729">좌표축 계산·등록 검사</a></p></section>
+<section id="measurements"><h2>실제 측정과 TCP 보정</h2>
+<p>기록 시각: 2026-09-02 01:10:46 UTC. FR5 제어기 TCP 표시와 ROS TF를 교차 확인한 기록이다.</p>
+<table><thead><tr><th>항목</th><th>기록값</th></tr></thead><tbody>
+<tr><td>작업영역 A · Y_CHECK 잔차</td><td>1.323302579mm</td></tr>
+<tr><td>작업영역 B · Y_CHECK 잔차</td><td>0.353643476mm</td></tr>
+<tr><td>제어기 TCP 높이</td><td>3.848mm</td></tr>
+<tr><td>보정 전 ROS 모델 TCP 높이</td><td>−2.299060855mm</td></tr>
+<tr><td>도구→TCP 길이 보정</td><td>256 → 249.852939145mm</td></tr>
+</tbody></table>
+<p>TCP 교차 확인은 도구가 아래를 향한 자세의 Z 방향에 대한 것이다. XY는 진단용으로 기록했다. Y_CHECK 잔차 역시 당시 기준점 검사의 결과이며 작업영역 전체의 절대 정확도를 뜻하지 않는다.</p>
+<p>24mm 큐브의 윗면에서 3.5mm 들어간 파지 기준으로 물체 중심→TCP는 8.5mm다. 이를 반영한 바닥 높이 −16.647mm에 충돌 여유 1mm를 더해 충돌 모델의 바닥은 −15.647mm로 두었다. 실측 기준과 보수적인 충돌면은 구분한다.</p>
+<p><a href="https://github.com/hasemu1211/fr5-lerobot-connector/blob/0b23f6a26976b6c6e18cff79809d9553ae2dc2ef/config/data_factory/calibration_evidence/place-ab-controller-ui-r002.json">측정 기록 JSON</a> · <a href="https://github.com/hasemu1211/fr5-lerobot-connector/blob/0b23f6a26976b6c6e18cff79809d9553ae2dc2ef/config/data_factory/planning_scenes/fr5-table-floor-wall-r003.json">바닥 충돌 모델</a></p></section>
+<section id="thresholds"><h2>임계값마다 검사하는 대상이 다르다</h2>
+<table><thead><tr><th>검사</th><th>해당 설정</th><th>역할</th></tr></thead><tbody>
+<tr><td>관절 표본과 TF 시각</td><td>차이 ≤10ms</td><td>같은 시점의 기구학적 자세 사용</td></tr>
+<tr><td>UI 등록 후보</td><td>각 오차 1mm</td><td>새 후보 미리보기의 기본값</td></tr>
+<tr><td>등록된 A/B 셀</td><td>인쇄 길이 1mm · X 거리 2mm · 평면 이탈 0.1mm · Y 잔차 2mm</td><td>항목별 등록 검사</td></tr>
+<tr><td>등록 오차 합산</td><td>4mm</td><td>항목의 산술 합 검사와 조건 생성 여유</td></tr>
+<tr><td>시연 동작 프로파일</td><td>목표 위치 1mm · 방향 0.01rad · 관절 0.01rad</td><td>해당 프로파일의 동작 검사 설정</td></tr>
+</tbody></table>
+<p>미리보기 기본값과 기존 등록의 허용값은 같지 않다. 합산 4mm는 통계적 신뢰구간이나 실물 위치 정확도의 보장값이 아니다. 조건 생성에서는 물체 외곽과 이 보정 여유만큼 영역을 줄여 허용 중심을 계산한다.</p>
+<p><a href="https://github.com/hasemu1211/fr5-lerobot-connector/blob/0b23f6a26976b6c6e18cff79809d9553ae2dc2ef/config/data_factory/cells/place-a-yaw0-r003.json">PLACE_A 등록 설정</a> · <a href="https://github.com/hasemu1211/fr5-lerobot-connector/blob/0b23f6a26976b6c6e18cff79809d9553ae2dc2ef/config/data_factory/cells/place-b-yaw0-r001.json">PLACE_B 등록 설정</a> · <a href="https://github.com/hasemu1211/fr5-lerobot-connector/blob/0b23f6a26976b6c6e18cff79809d9553ae2dc2ef/config/data_factory/motion_qualifications/fr5-place-a-wood-cube-24mm-r001-demonstration-rhythm-r001-opening-coordinate-r001.json">시연 동작 프로파일</a></p></section>
+<section id="kinematics"><h2>좌표 등록과 FK 검사의 역할</h2>
+<p>등록 경로는 같은 관절 시각의 base_link→wrist3_link TF와 도구→TCP 변환을 합성해 기준점 좌표를 얻는다. /compute_fk로 로봇 전체 도달영역을 탐색하는 방식은 아니다. 별도 실행 계층은 MoveIt의 GetPositionFK를 사용해 실행·접촉 형상을 계산한다. 영역 안의 배치 가능성과 로봇 경로의 도달성·충돌 검사는 별개다.</p>
+<p><a href="https://github.com/hasemu1211/fr5-lerobot-connector/blob/0b23f6a26976b6c6e18cff79809d9553ae2dc2ef/tools/data_factory/motion/pose_snapshot.py#L43">시각을 맞춘 TF·TCP 스냅샷</a> · <a href="https://github.com/hasemu1211/fr5-lerobot-connector/blob/0b23f6a26976b6c6e18cff79809d9553ae2dc2ef/tools/data_factory/motion/moveit_transport.py#L209">실행 계층의 FK</a></p></section>
+<details class="source-details"><summary>인쇄 보정과 서로 다른 작업영역 범위</summary><p>100mm 기준 막대가 96mm로 인쇄되면 생성기는 104.166667% 보정본을 만든다. 재인쇄한 막대는 다시 측정한다. 이 printcal 예와 위 셀의 100mm 시트 계열을 동일한 인쇄물로 취급하지 않는다.</p><p>기본 5×3 격자는 35mm 간격으로 x±70/y±35mm를 사용한다. RED/BLUE 영역판의 다각형 x±133.5/y±85mm는 별도 범위이며, 실제 허용 물체 중심은 선택 yaw·물체 외곽·보정 여유로 다시 계산한다.</p></details>
+<section id="measurement-extension"><h2>측정 방법을 바꾸어도 남는 데이터 연결</h2><p>현재 좌표계는 알고리즘 시연 궤적 생성이 1차 목적이다. 제한된 위치·각도·물체 조건을 실물에서 반복하고 시연·평가 기록에 같은 조건으로 남기는 프로토타입이기도 하다.</p><p>확장 방향은 A4 기준점 측정을 비전·다른 측정 입력으로 연결하는 것이다. <a href="https://april.eecs.umich.edu/software/apriltag">AprilTag</a>는 카메라 기준의 태그 위치·방향·식별을 제공해 작업면 등록 후보가 되고, <a href="https://nvlabs.github.io/FoundationPose/">FoundationPose</a>는 CAD 또는 소수 참조 영상으로 새로운 물체의 6D 자세 추정·추적을 다뤄 물체 관측의 후보가 된다.</p><p>카메라와 로봇 좌표계의 보정, 측정 시각·대상·불확실성의 연결은 각 입력 어댑터에서 구현·검증한다. 기존 작업 조건·시연·진단의 대응을 재사용하는 확장 방향이며 현재 자동 인식 기능을 뜻하지 않는다.</p></section>
+</main><script src="../scripts/reading.js"></script></body></html>

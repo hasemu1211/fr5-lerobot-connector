@@ -1,10 +1,10 @@
-# Recorder · Curator
+# 기록 품질과 학습 데이터 구성
 
-영상·상태·동작을 같은 시각에 맞추고, 원본과 판정을 보존하며 학습할 시연을 구성한다.
+로봇과 카메라는 서로 다른 시각에 신호를 보낸다. 먼저 이 신호를 같은 순간의 학습 표본으로 맞춘다. 저장된 시연은 작업 수행 내용을 검토해 선별하고, 영상만 바꾸거나 여러 원본을 합치더라도 동작·시각·평가 대상과의 대응을 유지한다.
 
 ## 시간 정렬
 
-![기준 시각의 앞뒤 관절 표본을 보간하고, 그리퍼의 이전 명령과 가장 가까운 카메라 프레임을 선택해 하나의 학습 행을 구성한다.](portfolio/alignment.drawio.svg)
+![기준 시각의 앞뒤 관절 표본을 보간하고, 그리퍼의 이전 명령과 가장 가까운 카메라 프레임을 선택해 하나의 학습 행을 구성한다.](portfolio/diagrams/alignment.drawio.svg)
 
 [Recorder](../tools/fr5_lerobot_recorder.py)는 정렬 거리와 수신 지연을 각각 검사해 시간상 유효한 관측으로 학습 표본을 만든다.
 
@@ -27,15 +27,15 @@
 
 ## 필수 자동 기준
 
-[Schema의 QUALITY_LIMITS](../tools/fr5_dataset_schema.py), Recorder와 [dataset validator](../tools/validate_lerobot_dataset.py)가 공유하는 기본 기준이다.
+[Schema의 QUALITY_LIMITS](../tools/fr5_dataset_schema.py), Recorder와 [dataset validator](../tools/validate_lerobot_dataset.py)가 공유하는 기본 기준이다. 수집 경로에서는 공통 하한보다 더 엄격한 기준을 적용할 수 있다.
 
 | 영역 | 기준 |
 | --- | ---: |
 | row FPS | 설정 FPS의 ±10% |
 | row gap | 설정 주기의 2배 초과가 전체 1% 이하 |
 | row·camera pause | 250 ms 이하 |
-| 저장 후 camera source FPS | dataset FPS의 75% 이상 |
-| live 시작 camera gate | 30 Hz profile의 28.5 Hz 이상 |
+| camera source FPS의 공통 하한 | dataset FPS의 75% 이상 |
+| 현재 OneJob 수집의 camera source FPS | 시작 검사와 리코더 모두 95% 이상: 30 Hz 설정에서 28.5 Hz |
 | camera frame 반복률 | 25% 이하 |
 | 영상·팔 명령의 정렬 거리, 상태·그리퍼 명령의 허용 나이 | 50 ms 이하 |
 | camera transport age | 300 ms 이하 |
@@ -47,14 +47,16 @@
 
 ## Selection · 학습 데이터 구성
 
-| 보존하는 근거 | 담당 모듈 | 다음 소비 |
-| --- | --- | --- |
-| 영상·행 구조·시간 정합 | Dataset Validator | 기술적으로 유효한 시연 |
-| 작업 수행·가시성 판정 | Candidate Review | 기술·작업 판정이 PASS인 선택 목록 |
-| 원본·판정 참조, 선택한 시연 | Curator Selection | Training Review / Training Entrypoint |
-| 승인한 데이터와 평가 배정 | Training Entrypoint | 학습·정규화·정책 비교 |
+정상 저장된 시연이라고 모두 학습에 적합한 것은 아니다. 영상과 신호가 온전한지 검사하고, 사람이 실제 작업 내용을 확인한 뒤 사용할 시연을 고른다. 선택 목록에는 원본과 판정 근거를 함께 남겨 무엇을 학습에 넣었는지 확인할 수 있게 한다. 학습을 시작할 때는 이 목록과 데이터가 검토 당시와 같은지 다시 확인한다.
 
-[Selection](../tools/data_factory/curator/workflow/selection.py)은 선택 목록과 기존 근거를 전달한다. 원본을 바꾸거나 부적합한 항목을 조용히 제외하지 않는다. 학습 소비자가 현재 데이터와 참조를 다시 검사한 뒤 요청을 발행한다. 요청 상태는 `REQUEST_NOT_APPROVED`이며 학습 승인은 [별도 경계](training-and-evaluation.md#승인과-실행-미리보기)이다.
+| 판단할 것 | 담당 | 결과 |
+| --- | --- | --- |
+| 영상이 열리고 신호가 시간에 맞게 저장됐는가 | Dataset Validator | 저장 품질 판정 |
+| 작업을 올바르게 수행했고 필요한 장면이 보이는가 | Candidate Review | 사람의 시연 검토 |
+| 어떤 시연을 학습에 사용할 것인가 | Curator Selection | 원본과 판정을 연결한 선택 목록 |
+| 선택한 데이터로 학습을 시작해도 되는가 | Training Review / Entrypoint | 승인한 데이터와 학습·평가 배정 |
+
+[Selection](../tools/data_factory/curator/workflow/selection.py)은 원본을 수정하지 않고 사용할 시연의 목록을 만든다. 목록에 문제가 있으면 검사를 통과하지 못하며, 일부를 임의로 빼고 학습을 시작하지 않는다. 선택 목록으로 만든 학습 요청은 아직 승인된 실행이 아니다. 데이터 확인 후 [별도의 학습 승인](training-and-evaluation.md#승인과-실행-미리보기)을 거친다.
 
 <details>
 <summary>요청 발행 · 변경 감지 · 원본 보존</summary>
@@ -77,9 +79,11 @@
 
 ## Video Transform · 작업 영역 보존
 
-![실제 같은 시점의 원본, 보존 마스크와 변환 결과. 작업 영역 밖의 사람을 고정 배경으로 치환하고 로봇·작업대 영역을 유지한다.](portfolio/assets/curator-person-triptych.png)
+![실제 같은 시점의 원본, 보존 마스크와 변환 결과. 작업 영역 밖의 사람을 고정 배경으로 치환하고 로봇·작업대 영역을 유지한다.](portfolio/assets/screenshots/curator-person-triptych.png)
 
 작업대·로봇 동작 영역을 보존 마스크로 지정하고, 바깥에는 표본 영상의 픽셀별 중앙값 배경을 적용한다. 상태·동작·작업 지시·시각과 원본 프레임 대응을 유지해 영상 조건을 바꾼다.
+
+목적은 작업과 관계없는 배경의 영향을 비교하는 것이다. 변환 전후의 로봇 상태와 정답 동작은 같게 두고, 로봇·작업대 영역이 잘 보존됐는지 영상을 검토한다. 정책 성능에 미치는 효과는 원본 영상으로 학습한 정책과 비교해 확인한다.
 
 <details>
 <summary>변환 검토 · 파생 데이터의 학습 연결</summary>
@@ -133,11 +137,13 @@ v2 profile에는 split 경로·파일 hash·native digest와 실제 디코딩한
 
 새 위치를 넓히는 수집과 이미 성공한 조건을 반복하는 수집은 다른 실험이다. 조건마다 성공 시연이 한 번씩 분산되어 있다면 TRAIN의 성공 조건을 반복해 동작·관측의 변동을 확인할 수 있다. [SmolVLA 공식 가이드](https://huggingface.co/docs/lerobot/main/smolvla)의 SO100 사례는 5개 위치에서 각 10회 시연을 사용한다. FR5의 최소 수량이나 반복의 성능 보장으로 전용하지 않는다.
 
-[Ledger](../tools/data_factory/episode_ledger.py)와 [native split](../tools/data_factory/training_split.py)으로 합격 TRAIN을 확인하고 [DQA](../tools/data_factory/quality/coverage_report.py)의 조건별 관측을 선택 이유로 남긴다. [Direct pose projection](../tools/data_factory/operator/catalog.py)으로 등록된 preset·위치·yaw·시도 수를 지정하고, [CampaignOperator](../tools/data_factory/campaign_operator.py)의 `update_draft`→`compile_draft`로 slot 순서·수량을 확인한다. 입력 dataset/split, source digests, 선택 조건과 compiler receipt를 보존한다. 대표 선택과 반증 조건은 [Curation design](../openspec/changes/curation-learning-loop/design.md)에 둔다.
+[Ledger](../tools/data_factory/episode_ledger.py)와 [native split](../tools/data_factory/training_split.py)으로 합격 TRAIN을 확인하고 [DQA](../tools/data_factory/quality/coverage_report.py)의 조건별 관측을 선택 이유로 남긴다. [Direct pose projection](../tools/data_factory/operator/catalog.py)으로 등록된 preset·위치·yaw·시도 수를 지정하고, [CampaignOperator](../tools/data_factory/campaign_operator.py)의 `update_draft`→`compile_draft`로 slot 순서·수량을 확인한다. 입력 dataset/split, source digests, 선택 조건과 compiler receipt를 보존한다. 대표 선택과 반증 조건은 [선별 비교 실험](#통제된-selection-utility-비교)에서 설명한다.
 
 이 authoring은 새 수집 권한을 주지 않는다. Collection이 현재 scene·장치·실행 자격을 검증한다. 새 episode 추가는 sorted-last split의 heldout을 바꿀 수 있으므로 Learning이 실제 분할을 다시 확인한다. 반복 시도 수·합격 시연 수·전체 취득 비용은 각각 측정한다.
 
 ## 여러 원본의 매핑과 평가 배정
+
+여러 데이터셋을 합치면 시연 번호가 바뀐다. 원본 시연이 통합본의 어느 번호가 됐는지 기록해, 기존 평가 시연이 학습 데이터에 섞이거나 비교 대상에서 빠지지 않도록 확인한다.
 
 [Mapped request producer](https://github.com/hasemu1211/fr5-lerobot-connector/blob/e4d7ed978cb5d8f082ec4f579b6d392bde604284/tools/data_factory/curator/workflow/mapping.py)의 `publish_mapped_training_request`는 frozen raw 요청과 ledger/state를 검증하고 native merge로 별도 dataset을 만든다. 전체 원본과 영상을 복사하되 학습 요청은 명시한 선택만 포함한다. source별 episode 수가 달라도 dataset identity와 episode/global index 대응을 보존하며, 기존 평가 cohort가 정확히 대응하지 않으면 발행하지 않는다. caller가 복사 예산을 지정한다.
 
@@ -162,7 +168,7 @@ python3 -m tools.data_factory.curator training-request \
 
 불일치는 `SELECTION_EVALUATION_CHANGED`로 발행 전에 거부한다. preview의 `evaluation_cohort`는 launch split을 강제하지 않으므로 학습 소비자가 같은 fraction과 실제 분할을 확인한다.
 
-[Selection 시나리오](../openspec/changes/curation-learning-loop/specs/curation-learning-loop/spec.md)와 [CLI 회귀](../tests/data_factory/curator/test_cli.py)는 합성 입력으로 검증한다.
+[선별 회귀](../tests/data_factory/curator/workflow/test_selection.py)와 [CLI 회귀](../tests/data_factory/curator/test_cli.py)는 합성 입력으로 평가 대상 변경 거부·원본 보존·기존 학습 소비자의 요청 수용을 검증한다.
 
 ```sh
 PYTHONDONTWRITEBYTECODE=1 direnv exec . python3 -m unittest \
